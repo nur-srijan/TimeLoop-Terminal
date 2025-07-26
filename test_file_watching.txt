@@ -1,0 +1,5 @@
+This is a test file to verify that file watching is working correctly.
+
+The TimeLoop Terminal should be recording this file creation event.
+
+MODIFIED: This line was added to test file modification tracking! 

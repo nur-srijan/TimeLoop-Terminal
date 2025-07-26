@@ -1,0 +1,49 @@
+[package]
+name = "timeloop-terminal"
+version = "0.1.0"
+edition = "2021"
+authors = ["TimeLoop Terminal Team"]
+description = "A CLI that lets you rewind, replay, and branch your coding sessions"
+license = "MIT"
+
+[dependencies]
+# Terminal and TUI
+crossterm = "0.27"
+ratatui = "0.24"
+
+# Event handling and async
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Database for event sourcing
+sled = "0.34"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# File system watching
+notify = "6.0"
+
+# Command parsing and execution
+clap = { version = "4.0", features = ["derive"] }
+shellwords = "1.1"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# System directories
+dirs = "5.0"
+
+# Optional: For future AI features
+reqwest = { version = "0.11", features = ["json"], optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.10" 
