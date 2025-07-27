@@ -197,6 +197,8 @@ mod tests {
     use super::*;
     use crate::events::EventRecorder;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
     use tempfile::TempDir;
 
     #[test]
@@ -204,8 +206,13 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path().join("events.db");
         let storage = crate::storage::Storage::with_path(db_path.to_str().unwrap()).unwrap();
-        let event_recorder = EventRecorder::with_storage("test-session", storage);
-        let mut file_watcher = FileWatcher::new(event_recorder).unwrap();
+        let event_recorder = Arc::new(Mutex::new(EventRecorder::with_storage("test-session", storage)));
+        
+        // Create a callback function that matches the expected signature
+        let callback: FileChangeCallback = Arc::new(Mutex::new(move |_path: &str, _change_type: FileChangeType| {
+            Ok(())
+        }));
+        let mut file_watcher = FileWatcher::new(callback).unwrap();
         
         // Test basic ignore patterns
         assert!(file_watcher.should_ignore(&PathBuf::from(".git/config")));
