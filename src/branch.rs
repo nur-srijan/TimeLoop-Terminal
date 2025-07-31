@@ -107,14 +107,7 @@ impl BranchManager {
     }
 
     pub fn delete_branch(&mut self, branch_id: &str) -> crate::Result<()> {
-        // Delete all events for this branch
-        self.storage.clear_session_events(branch_id)?;
-        
-        // Delete the branch metadata
-        let key = format!("branch:{}", branch_id);
-        self.storage.db.remove(key)?;
-        
-        Ok(())
+        self.storage.delete_branch(branch_id)
     }
 }
 

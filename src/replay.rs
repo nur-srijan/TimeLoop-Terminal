@@ -34,7 +34,7 @@ impl ReplayEngine {
         println!("Press Ctrl+C to stop replay");
         println!("{}", "─".repeat(60));
 
-        let mut stdout = std::io::stdout();
+        let _stdout = std::io::stdout();
         let mut last_timestamp = events[0].timestamp;
 
         for (i, event) in events.iter().enumerate() {

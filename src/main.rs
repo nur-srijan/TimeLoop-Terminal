@@ -4,10 +4,10 @@ use timeloop_terminal::{
     terminal::TerminalEmulator,
     events::EventRecorder,
     replay::ReplayEngine,
-    branch::TimelineBranch,
     error::TimeLoopError,
+    storage::Storage,
 };
-use tracing::{info, error};
+use tracing::info;
 
 #[derive(Parser)]
 #[command(name = "timeloop")]
@@ -101,6 +101,8 @@ async fn main() -> Result<(), TimeLoopError> {
 async fn start_session(name: &str) -> Result<(), TimeLoopError> {
     info!("🎬 Starting new session: {}", name);
     
+    let _storage = Storage::new()?;
+
     let mut session_manager = SessionManager::new()?;
     let session_id = session_manager.create_session(name)?;
     

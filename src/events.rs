@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
-use std::collections::HashMap;
 use crate::storage::Storage;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,7 +73,7 @@ pub struct EventRecorder {
     storage: Storage,
     sequence_counter: u64,
     current_command: Option<String>,
-    command_buffer: Vec<String>,
+    // Removed unused field: command_buffer
 }
 
 impl EventRecorder {
@@ -85,26 +84,14 @@ impl EventRecorder {
             storage,
             sequence_counter: 0,
             current_command: None,
-            command_buffer: Vec::new(),
+
         })
     }
 
-    /// Create a new event recorder with a unique database path to avoid conflicts
+    // Remove new_with_unique_db since we're using in-memory storage
     pub fn new_with_unique_db(session_id: &str) -> crate::Result<Self> {
-        let mut db_path = Storage::get_db_path()?;
-        // Modify the path to be unique for this instance
-        let filename = db_path.file_name().unwrap().to_string_lossy();
-        let new_filename = format!("{}_{}", session_id, filename);
-        db_path.set_file_name(new_filename);
-        
-        let storage = Storage::with_path(db_path.to_str().unwrap())?;
-        Ok(Self {
-            session_id: session_id.to_string(),
-            storage,
-            sequence_counter: 0,
-            current_command: None,
-            command_buffer: Vec::new(),
-        })
+        // In-memory storage doesn't need unique paths
+        Self::new(session_id)
     }
 
     pub fn with_storage(session_id: &str, storage: Storage) -> Self {
@@ -113,7 +100,7 @@ impl EventRecorder {
             storage,
             sequence_counter: 0,
             current_command: None,
-            command_buffer: Vec::new(),
+
         }
     }
 
@@ -209,4 +196,4 @@ impl EventRecorder {
     pub fn storage(&self) -> &Storage {
         &self.storage
     }
-} 
+}

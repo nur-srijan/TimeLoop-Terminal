@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 use notify::{Watcher, RecursiveMode, recommended_watcher};
 use std::sync::mpsc;
-use std::time::Duration;
+
 use tokio::sync::mpsc as tokio_mpsc;
-use crate::{FileChangeType, TimeLoopError};
+use crate::FileChangeType;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 

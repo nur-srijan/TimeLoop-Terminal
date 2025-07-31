@@ -16,8 +16,7 @@ tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Database for event sourcing
-sled = "0.34"
+# In-memory storage (no database needed!)
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # File system watching
@@ -38,12 +37,9 @@ tracing-subscriber = "0.3"
 anyhow = "1.0"
 thiserror = "1.0"
 
-# System directories
-dirs = "5.0"
-
 # Optional: For future AI features
 reqwest = { version = "0.11", features = ["json"], optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
-tempfile = "3.10" 
+tempfile = "3.10"

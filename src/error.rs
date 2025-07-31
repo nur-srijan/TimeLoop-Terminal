@@ -5,8 +5,8 @@ pub enum TimeLoopError {
     #[error("Terminal error: {0}")]
     Terminal(#[from] std::io::Error),
     
-    #[error("Database error: {0}")]
-    Database(String),
+    #[error("Storage error: {0}")]
+    Storage(String),
     
     #[error("Session not found: {0}")]
     SessionNotFound(String),
@@ -29,9 +29,6 @@ pub enum TimeLoopError {
     #[error("Branch error: {0}")]
     Branch(String),
     
-    #[error("Storage error: {0}")]
-    Storage(String),
-    
     #[error("File watcher error: {0}")]
     FileWatcher(#[from] notify::Error),
     
@@ -50,11 +47,3 @@ impl From<anyhow::Error> for TimeLoopError {
         TimeLoopError::Unknown(err.to_string())
     }
 }
-
-impl From<sled::Error> for TimeLoopError {
-    fn from(err: sled::Error) -> Self {
-        TimeLoopError::Database(err.to_string())
-    }
-}
-
- 

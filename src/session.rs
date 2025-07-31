@@ -1,7 +1,7 @@
 use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc, Duration};
 use uuid::Uuid;
-use crate::{Storage, Event, EventType, TimeLoopError};
+use crate::{Storage, EventType, TimeLoopError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -131,14 +131,7 @@ impl SessionManager {
     }
 
     pub fn delete_session(&mut self, session_id: &str) -> crate::Result<()> {
-        // Delete all events for this session
-        self.storage.clear_session_events(session_id)?;
-        
-        // Delete the session itself
-        let key = format!("session:{}", session_id);
-        self.storage.db.remove(key)?;
-        
-        Ok(())
+        self.storage.delete_session(session_id)
     }
 
     pub fn get_session_tree(&self) -> crate::Result<Vec<SessionNode>> {
