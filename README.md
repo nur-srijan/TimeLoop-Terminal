@@ -4,7 +4,7 @@
 
 A superintelligent terminal emulator that records every keystroke, file change, CLI command, and shell state, allowing you to rewind, replay, and branch your coding sessions like a Git repository for your terminal history.
 
-## Mermaid Diagram
+## Architecture Diagram
 
 ```mermaid
 flowchart TD
