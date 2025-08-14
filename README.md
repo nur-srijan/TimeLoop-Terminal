@@ -6,6 +6,7 @@ A superintelligent terminal emulator that records every keystroke, file change, 
 
 ## Mermaid Diagram
 
+```mermaid
 flowchart TD
     CLI["CLI Layer"]:::api
     API["Public Library API"]:::api
@@ -84,6 +85,7 @@ flowchart TD
     click Replay "https://github.com/nur-srijan/timeloop-terminal/blob/main/src/replay.rs"
     click Branch "https://github.com/nur-srijan/timeloop-terminal/blob/main/src/branch.rs"
     click Terminal "https://github.com/nur-srijan/timeloop-terminal/blob/main/src/terminal.rs"
+```
 
 ## ✨ Features
 
