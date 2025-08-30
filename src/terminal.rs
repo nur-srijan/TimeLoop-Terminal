@@ -1,12 +1,15 @@
 use std::process::{Command, Stdio};
 use std::io::{self, Write};
 use std::path::PathBuf;
-use crossterm::terminal::disable_raw_mode;
+use std::sync::{Arc, Mutex};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, EventStream};
 use tokio::task::JoinHandle;
-use crate::{EventRecorder, TimeLoopError};
+use crate::{EventRecorder, TimeLoopError, FileChangeType};
+use crate::file_watcher::FileWatcher;
 
 pub struct TerminalEmulator {
-    pub(crate) event_recorder: EventRecorder,
+    pub(crate) event_recorder: Arc<Mutex<EventRecorder>>,
     working_directory: String,
     file_watcher_handle: Option<JoinHandle<()>>,
 }
@@ -18,7 +21,7 @@ impl TerminalEmulator {
             .to_string();
         
         Ok(Self {
-            event_recorder,
+            event_recorder: Arc::new(Mutex::new(event_recorder)),
             working_directory,
             file_watcher_handle: None,
         })
@@ -26,11 +29,44 @@ impl TerminalEmulator {
 
     /// Start file watching for the current directory
     pub(crate) async fn start_file_watching(&mut self) -> crate::Result<()> {
-        let _current_dir = PathBuf::from(&self.working_directory);
-        
-        // In-memory storage doesn't have database conflicts, but we'll keep file watching disabled for now
-        // TODO: Re-implement file watching with in-memory storage
+        let watch_path = PathBuf::from(&self.working_directory);
+        let recorder = self.event_recorder.clone();
         println!("📁 File watching started for: {}", self.working_directory);
+
+        let handle = tokio::spawn(async move {
+            // Create callback closure to record file changes
+            let cb: crate::file_watcher::FileChangeCallback = {
+                let recorder = recorder.clone();
+                Arc::new(tokio::sync::Mutex::new(move |path: &str, change: FileChangeType| {
+                    // Synchronous closure: use std::sync::Mutex to mutate recorder
+                    if let Ok(mut guard) = recorder.lock() {
+                        if let Err(e) = guard.record_file_change(path, change) {
+                            eprintln!("Error recording file change: {}", e);
+                        }
+                    }
+                    Ok(())
+                }))
+            };
+
+            let mut watcher = match FileWatcher::new(cb) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("Failed to init file watcher: {}", e);
+                    return;
+                }
+            };
+
+            if let Err(e) = watcher.add_watch_path(watch_path.clone(), true) {
+                eprintln!("Failed to add watch path: {}", e);
+                return;
+            }
+
+            if let Err(e) = watcher.start_watching().await {
+                eprintln!("File watching stopped with error: {}", e);
+            }
+        });
+
+        self.file_watcher_handle = Some(handle);
         Ok(())
     }
 
@@ -47,53 +83,70 @@ impl TerminalEmulator {
     }
 
     pub async fn run(&mut self) -> crate::Result<()> {
-        // Use standard input mode instead of raw mode
-        // This should avoid the character duplication issues
-        
+        // Enable raw mode to capture keystrokes and resize events
+        enable_raw_mode()?;
+
         // Record initial terminal state
         let (cols, rows) = crossterm::terminal::size()?;
-        self.event_recorder.record_terminal_state((0, 0), (cols, rows))?;
+        if let Ok(mut guard) = self.event_recorder.lock() {
+            guard.record_terminal_state((0, 0), (cols, rows))?;
+        }
         
         // Start file watching
         if let Err(e) = self.start_file_watching().await {
             eprintln!("Warning: Could not start file watching: {}", e);
         }
         
-        // Print welcome message
-        println!("TimeLoop Terminal - PowerShell Mode");
-        println!("Type 'exit' to quit");
-        println!("------------------------------");
-        
-        // Main loop using standard input
-        let stdin = io::stdin();
-        let mut stdout = io::stdout();
-        
+        println!("TimeLoop Terminal - Raw Mode (type commands and press Enter). Type 'exit' to quit.");
+
+        let mut input_buffer = String::new();
         let result = loop {
-            // Display prompt
-            print!("> ");
-            stdout.flush()?;
-            
-            // Read a line of input
-            let mut input = String::new();
-            stdin.read_line(&mut input)?;
-            
-            // Trim the input
-            let input = input.trim();
-            
-            // Record the command
-            for c in input.chars() {
-                self.event_recorder.record_key_press(&c.to_string())?;
+            // Poll for events
+            if event::poll(std::time::Duration::from_millis(200))? {
+                match event::read()? {
+                    CEvent::Key(KeyEvent { code, .. }) => {
+                        match code {
+                            KeyCode::Char(c) => {
+                                input_buffer.push(c);
+                                if let Ok(mut guard) = self.event_recorder.lock() {
+                                    guard.record_key_press(&c.to_string())?;
+                                }
+                                print!("{}", c);
+                                io::stdout().flush()?;
+                            }
+                            KeyCode::Backspace => {
+                                input_buffer.pop();
+                                print!("\u{8} \u{8}");
+                                io::stdout().flush()?;
+                            }
+                            KeyCode::Enter => {
+                                println!();
+                                let cmd = input_buffer.trim().to_string();
+                                if cmd == "exit" || cmd == "quit" {
+                                    println!("👋 Goodbye!");
+                                    break Ok(());
+                                }
+                                let output = self.execute_external_command(&cmd).await?;
+                                if let Ok(mut guard) = self.event_recorder.lock() {
+                                    guard.record_command(&cmd, &output.output, output.exit_code, &self.working_directory)?;
+                                }
+                                input_buffer.clear();
+                                print!("> ");
+                                io::stdout().flush()?;
+                            }
+                            _ => {}
+                        }
+                    }
+                    CEvent::Resize(w, h) => {
+                        if let Ok(mut guard) = self.event_recorder.lock() {
+                            guard.record_terminal_state((0, 0), (w, h))?;
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                // Periodic tasks can go here
             }
-            
-            // Check for exit command
-            if input == "exit" || input == "quit" {
-                println!("👋 Goodbye!");
-                break Ok(());
-            }
-            
-            // Execute the command
-            let output = self.execute_external_command(input).await?;
-            self.event_recorder.record_command(input, &output.output, output.exit_code, &self.working_directory)?;
         };
         
         // Cleanup: stop file watching

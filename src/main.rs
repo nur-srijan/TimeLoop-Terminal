@@ -8,6 +8,7 @@ use timeloop_terminal::{
     storage::Storage,
 };
 use tracing::info;
+use chrono::{DateTime, Utc};
 
 #[derive(Parser)]
 #[command(name = "timeloop")]
@@ -48,17 +49,73 @@ enum Commands {
         #[arg(short, long, default_value = "1.0")]
         speed: f32,
     },
+    /// Replay a session within a time range
+    ReplayRange {
+        /// Session ID to replay
+        session_id: String,
+        /// ISO8601 start timestamp
+        #[arg(long)]
+        start: String,
+        /// ISO8601 end timestamp
+        #[arg(long)]
+        end: String,
+        /// Playback speed
+        #[arg(short, long, default_value = "1.0")]
+        speed: f32,
+    },
     /// Create a branch from a session
     Branch {
         /// Source session ID
         session_id: String,
         /// Branch name
         name: String,
+        /// Create branch at specific event ID
+        #[arg(long)]
+        event_id: Option<String>,
+        /// Create branch at timestamp (RFC3339)
+        #[arg(long)]
+        at: Option<String>,
+    },
+    /// List branches for a session
+    Branches {
+        /// Session ID
+        session_id: String,
+    },
+    /// Merge a branch into a target session
+    Merge {
+        /// Branch ID
+        branch_id: String,
+        /// Target session ID
+        target_session_id: String,
+    },
+    /// Delete a branch
+    DeleteBranch {
+        /// Branch ID to delete
+        branch_id: String,
+    },
+    /// Show session tree (parent/child relationships)
+    Tree,
+    /// Show event timeline for a session
+    Timeline {
+        /// Session ID
+        session_id: String,
     },
     /// Show session summary
     Summary {
         /// Session ID
         session_id: String,
+    },
+    /// Export a session to JSON file
+    Export {
+        /// Session ID
+        session_id: String,
+        /// Output file path
+        output: String,
+    },
+    /// Import a session from JSON file
+    Import {
+        /// Input file path
+        input: String,
     },
 }
 
@@ -82,11 +139,35 @@ async fn main() -> Result<(), TimeLoopError> {
         Some(Commands::Replay { session_id, speed }) => {
             replay_session(session_id, *speed).await?;
         }
-        Some(Commands::Branch { session_id, name }) => {
-            create_branch(session_id, name).await?;
+        Some(Commands::ReplayRange { session_id, start, end, speed }) => {
+            replay_session_range(session_id, start, end, *speed).await?;
+        }
+        Some(Commands::Branch { session_id, name, event_id, at }) => {
+            create_branch(session_id, name, event_id.as_deref(), at.as_deref()).await?;
+        }
+        Some(Commands::Branches { session_id }) => {
+            list_branches(session_id).await?;
+        }
+        Some(Commands::Merge { branch_id, target_session_id }) => {
+            merge_branch(branch_id, target_session_id).await?;
+        }
+        Some(Commands::DeleteBranch { branch_id }) => {
+            delete_branch(branch_id).await?;
         }
         Some(Commands::Summary { session_id }) => {
             show_summary(session_id).await?;
+        }
+        Some(Commands::Tree) => {
+            show_session_tree().await?;
+        }
+        Some(Commands::Timeline { session_id }) => {
+            show_event_timeline(session_id).await?;
+        }
+        Some(Commands::Export { session_id, output }) => {
+            export_session(session_id, output).await?;
+        }
+        Some(Commands::Import { input }) => {
+            import_session(input).await?;
         }
         None => {
             // Default behavior: start a new session
@@ -146,14 +227,80 @@ async fn replay_session(session_id: &str, speed: f32) -> Result<(), TimeLoopErro
     Ok(())
 }
 
-async fn create_branch(session_id: &str, name: &str) -> Result<(), TimeLoopError> {
+async fn replay_session_range(session_id: &str, start: &str, end: &str, speed: f32) -> Result<(), TimeLoopError> {
+    let replay_engine = ReplayEngine::new(session_id)?;
+    let start_ts = chrono::DateTime::parse_from_rfc3339(start)
+        .map_err(|e| TimeLoopError::Replay(format!("Invalid start time: {}", e)))?
+        .with_timezone(&Utc);
+    let end_ts = chrono::DateTime::parse_from_rfc3339(end)
+        .map_err(|e| TimeLoopError::Replay(format!("Invalid end time: {}", e)))?
+        .with_timezone(&Utc);
+    replay_engine.replay_range(start_ts, end_ts, speed).await?;
+    Ok(())
+}
+
+async fn create_branch(session_id: &str, name: &str, event_id: Option<&str>, at: Option<&str>) -> Result<(), TimeLoopError> {
     info!("🧬 Creating branch '{}' from session: {}", name, session_id);
-    
+
+    // Create a branch session entry
     let mut session_manager = SessionManager::new()?;
-    let branch_id = session_manager.create_branch(session_id, name)?;
-    
-    println!("✅ Created branch '{}' with ID: {}", name, branch_id);
-    
+    let new_session_id = session_manager.create_branch(session_id, name)?;
+
+    // Also record a timeline branch at the last event as branch point
+    let storage = Storage::new()?;
+    let branch_point_id = if let Some(eid) = event_id {
+        eid.to_string()
+    } else if let Some(at_ts) = at {
+        let ts = chrono::DateTime::parse_from_rfc3339(at_ts)
+            .map_err(|e| TimeLoopError::Branch(format!("Invalid --at timestamp: {}", e)))?
+            .with_timezone(&Utc);
+        let mut events = storage.get_events_for_session(session_id)?;
+        events.sort_by_key(|e| e.timestamp);
+        events
+            .iter()
+            .rev()
+            .find(|e| e.timestamp <= ts)
+            .map(|e| e.id.clone())
+            .unwrap_or_else(|| "0".to_string())
+    } else {
+        storage
+            .get_last_event(session_id)?
+            .map(|e| e.id)
+            .unwrap_or_else(|| "0".to_string())
+    };
+
+    let mut branch_manager = timeloop_terminal::branch::BranchManager::new()?;
+    let timeline_branch_id = branch_manager.create_branch(session_id, name, &branch_point_id, None)?;
+
+    println!(
+        "✅ Created branch '{}' with session ID: {} and timeline ID: {}",
+        name, new_session_id, timeline_branch_id
+    );
+
+    Ok(())
+}
+
+async fn list_branches(session_id: &str) -> Result<(), TimeLoopError> {
+    let branch_manager = timeloop_terminal::branch::BranchManager::new()?;
+    let branches = branch_manager.get_branches_for_session(session_id)?;
+    println!("Branches for session {}:", session_id);
+    for b in branches {
+        println!("- {} (id: {})", b.name, b.id);
+    }
+    Ok(())
+}
+
+async fn merge_branch(branch_id: &str, target_session_id: &str) -> Result<(), TimeLoopError> {
+    let mut branch_manager = timeloop_terminal::branch::BranchManager::new()?;
+    branch_manager.merge_branch(branch_id, target_session_id)?;
+    println!("Merged branch {} into session {}", branch_id, target_session_id);
+    Ok(())
+}
+
+async fn delete_branch(branch_id: &str) -> Result<(), TimeLoopError> {
+    let mut branch_manager = timeloop_terminal::branch::BranchManager::new()?;
+    branch_manager.delete_branch(branch_id)?;
+    println!("Deleted branch {}", branch_id);
     Ok(())
 }
 
@@ -172,3 +319,53 @@ async fn show_summary(session_id: &str) -> Result<(), TimeLoopError> {
     
     Ok(())
 } 
+
+async fn export_session(session_id: &str, output: &str) -> Result<(), TimeLoopError> {
+    let storage = Storage::new()?;
+    storage.export_session_to_file(session_id, output)?;
+    println!("Exported session {} to {}", session_id, output);
+    Ok(())
+}
+
+async fn show_session_tree() -> Result<(), TimeLoopError> {
+    let session_manager = SessionManager::new()?;
+    let tree = session_manager.get_session_tree()?;
+
+    fn print_node(node: &timeloop_terminal::session::SessionNode, depth: usize) {
+        let indent = "  ".repeat(depth);
+        println!("{}- {} ({})", indent, node.session.name, node.session.id);
+        for child in &node.children {
+            print_node(child, depth + 1);
+        }
+    }
+
+    println!("Session Tree:");
+    for node in &tree {
+        print_node(node, 0);
+    }
+    Ok(())
+}
+
+async fn show_event_timeline(session_id: &str) -> Result<(), TimeLoopError> {
+    let storage = Storage::new()?;
+    let mut events = storage.get_events_for_session(session_id)?;
+    events.sort_by_key(|e| e.sequence_number);
+    println!("Event timeline for session {}:", session_id);
+    for e in events {
+        println!("{} [{}] seq={}", e.timestamp.to_rfc3339(), match &e.event_type {
+            timeloop_terminal::EventType::KeyPress { key, .. } => format!("KeyPress {}", key),
+            timeloop_terminal::EventType::Command { command, .. } => format!("Command {}", command),
+            timeloop_terminal::EventType::FileChange { path, change_type, .. } => format!("FileChange {:?} {}", change_type, path),
+            timeloop_terminal::EventType::TerminalState { .. } => "TerminalState".to_string(),
+            timeloop_terminal::EventType::SessionMetadata { name, .. } => format!("SessionMetadata {}", name),
+        }, e.sequence_number);
+    }
+    Ok(())
+}
+
+async fn import_session(input: &str) -> Result<(), TimeLoopError> {
+    let storage = Storage::new()?;
+    let id = storage.import_session_from_file(input)?;
+    println!("Imported session with ID {}", id);
+    Ok(())
+}

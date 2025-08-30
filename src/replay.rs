@@ -1,5 +1,5 @@
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::time::{sleep, Instant};
 use crossterm::{
     terminal::{Clear, ClearType},
     style::{Color, Print, ResetColor, SetForegroundColor},
@@ -7,6 +7,7 @@ use crossterm::{
 };
 use std::io::Write;
 use crate::{Storage, Event, EventType, FileChangeType};
+use crossterm::event::{self, Event as CEvent, KeyCode};
 
 pub struct ReplayEngine {
     storage: Storage,
@@ -31,24 +32,42 @@ impl ReplayEngine {
         }
 
         println!("🎥 Replaying session: {} at {}x speed", self.session_id, speed);
-        println!("Press Ctrl+C to stop replay");
+        println!("Controls: space=pause/resume, +/-=speed, q=quit");
         println!("{}", "─".repeat(60));
 
         let _stdout = std::io::stdout();
         let mut last_timestamp = events[0].timestamp;
+        let mut current_speed = if speed <= 0.0 { 1.0 } else { speed };
+        let mut paused = false;
 
         for (i, event) in events.iter().enumerate() {
             // Calculate delay based on speed
             let delay = if i > 0 {
                 let time_diff = event.timestamp - last_timestamp;
                 let delay_ms = time_diff.num_milliseconds() as u64;
-                (delay_ms as f32 / speed) as u64
+                (delay_ms as f32 / current_speed) as u64
             } else {
                 0
             };
 
             if delay > 0 {
-                sleep(Duration::from_millis(delay)).await;
+                let start = Instant::now();
+                while start.elapsed().as_millis() < delay as u128 {
+                    // Handle interactive input during delay
+                    if event::poll(Duration::from_millis(50))? {
+                        if let CEvent::Key(key) = event::read()? {
+                            match key.code {
+                                KeyCode::Char(' ') => { paused = !paused; }
+                                KeyCode::Char('+') => { current_speed *= 2.0; }
+                                KeyCode::Char('-') => { current_speed = (current_speed / 2.0).max(0.25); }
+                                KeyCode::Char('q') => { println!("\n⏹️  Quit replay"); return Ok(()); }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if paused { sleep(Duration::from_millis(50)).await; continue; }
+                    sleep(Duration::from_millis(10)).await;
+                }
             }
 
             // Display the event
