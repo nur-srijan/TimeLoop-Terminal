@@ -117,6 +117,14 @@ enum Commands {
         /// Input file path
         input: String,
     },
+    /// AI summarize a session (requires --features ai)
+    Summarize {
+        /// Session ID to summarize
+        session_id: String,
+        /// Model name (default: openrouter/auto)
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -168,6 +176,9 @@ async fn main() -> Result<(), TimeLoopError> {
         }
         Some(Commands::Import { input }) => {
             import_session(input).await?;
+        }
+        Some(Commands::Summarize { session_id, model }) => {
+            run_ai_summarize(session_id, model.as_deref()).await?;
         }
         None => {
             // Default behavior: start a new session
@@ -367,5 +378,19 @@ async fn import_session(input: &str) -> Result<(), TimeLoopError> {
     let storage = Storage::new()?;
     let id = storage.import_session_from_file(input)?;
     println!("Imported session with ID {}", id);
+    Ok(())
+}
+
+#[cfg(feature = "ai")]
+async fn run_ai_summarize(session_id: &str, model: Option<&str>) -> Result<(), TimeLoopError> {
+    let model = model.unwrap_or("openrouter/auto");
+    let summary = timeloop_terminal::ai::summarize_session(session_id, model).await?;
+    println!("{}", summary);
+    Ok(())
+}
+
+#[cfg(not(feature = "ai"))]
+async fn run_ai_summarize(_session_id: &str, _model: Option<&str>) -> Result<(), TimeLoopError> {
+    println!("AI feature not enabled. Rebuild with: cargo run --features ai");
     Ok(())
 }

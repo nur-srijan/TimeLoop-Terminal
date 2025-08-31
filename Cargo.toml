@@ -46,3 +46,7 @@ reqwest = { version = "0.11", features = ["json"], optional = true }
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.10"
+
+[features]
+default = []
+ai = ["reqwest"]
