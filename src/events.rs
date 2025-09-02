@@ -79,10 +79,15 @@ pub struct EventRecorder {
 impl EventRecorder {
     pub fn new(session_id: &str) -> crate::Result<Self> {
         let storage = Storage::new()?;
+        // Initialize sequence counter from last stored event to avoid duplication when multiple recorders exist
+        let last_seq = storage
+            .get_last_event(session_id)?
+            .map(|e| e.sequence_number)
+            .unwrap_or(0);
         Ok(Self {
             session_id: session_id.to_string(),
             storage,
-            sequence_counter: 0,
+            sequence_counter: last_seq,
             current_command: None,
 
         })
@@ -95,10 +100,16 @@ impl EventRecorder {
     }
 
     pub fn with_storage(session_id: &str, storage: Storage) -> Self {
+        let last_seq = storage
+            .get_last_event(session_id)
+            .ok()
+            .flatten()
+            .map(|e| e.sequence_number)
+            .unwrap_or(0);
         Self {
             session_id: session_id.to_string(),
             storage,
-            sequence_counter: 0,
+            sequence_counter: last_seq,
             current_command: None,
 
         }

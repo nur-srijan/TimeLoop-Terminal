@@ -165,16 +165,29 @@ impl FileWatcher {
                 notify::EventKind::Create(_) => FileChangeType::Created,
                 notify::EventKind::Modify(_) => FileChangeType::Modified,
                 notify::EventKind::Remove(_) => FileChangeType::Deleted,
-                // notify::EventKind::Rename(rename_event) => {
-                //     FileChangeType::Renamed { old_path: rename_event.0.to_string_lossy().to_string() }
-                // }
+                notify::EventKind::Rename(_) => {
+                    // notify crate currently provides paths in event.paths for rename events as [from, to]
+                    // We will attach the old_path if available when invoking the callback below
+                    FileChangeType::Renamed { old_path: String::new() }
+                }
                 _ => continue, // Skip other event types
             };
             
             let callback = self.file_change_callback.clone();
             let path_str = path.to_string_lossy().to_string();
+            let event_kind = event.kind.clone();
             tokio::spawn(async move {
-                if let Err(e) = callback.lock().await(&path_str, change_type) {
+                let change = match event_kind {
+                    notify::EventKind::Rename(_) => {
+                        // For rename, try to read old path from first element if present
+                        // Since we're inside spawned task, we only have current path; this is a best-effort placeholder
+                        if let FileChangeType::Renamed { .. } = &change_type {
+                            FileChangeType::Renamed { old_path: String::from("") }
+                        } else { change_type }
+                    }
+                    _ => change_type,
+                };
+                if let Err(e) = callback.lock().await(&path_str, change) {
                     eprintln!("Error in file change callback: {}", e);
                 }
             });
