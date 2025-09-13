@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::collections::HashMap;
 use notify::{Watcher, RecursiveMode, recommended_watcher};
+use notify::event::{EventKind, ModifyKind, RenameMode};
 use std::sync::mpsc;
 
 use tokio::sync::mpsc as tokio_mpsc;
@@ -165,7 +166,7 @@ impl FileWatcher {
                 notify::EventKind::Create(_) => FileChangeType::Created,
                 notify::EventKind::Modify(_) => FileChangeType::Modified,
                 notify::EventKind::Remove(_) => FileChangeType::Deleted,
-                notify::EventKind::Rename(_) => {
+                notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
                     // notify crate currently provides paths in event.paths for rename events as [from, to]
                     // We will attach the old_path if available when invoking the callback below
                     FileChangeType::Renamed { old_path: String::new() }
@@ -178,7 +179,7 @@ impl FileWatcher {
             let event_kind = event.kind.clone();
             tokio::spawn(async move {
                 let change = match event_kind {
-                    notify::EventKind::Rename(_) => {
+                    notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
                         // For rename, try to read old path from first element if present
                         // Since we're inside spawned task, we only have current path; this is a best-effort placeholder
                         if let FileChangeType::Renamed { .. } = &change_type {

@@ -207,6 +207,8 @@ timeloop summary <session-id>
 
 ```
 src/
+├── bin/
+|   └── gui.rs       # (Optional) Graphical interface
 ├── main.rs          # CLI entry point
 ├── lib.rs           # Library exports
 ├── error.rs         # Error handling

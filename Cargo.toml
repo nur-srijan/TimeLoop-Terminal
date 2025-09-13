@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 # Terminal and TUI
-crossterm = "0.27"
+crossterm = { version = "0.27", features = ["event-stream"] }
 ratatui = "0.24"
 
 # Event handling and async
@@ -20,7 +20,7 @@ serde_json = "1.0"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # File system watching
-notify = "6.0"
+notify >= "6.0"
 
 # Command parsing and execution
 clap = { version = "4.0", features = ["derive"] }
