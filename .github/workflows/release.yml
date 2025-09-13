@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-artifacts:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        target: ["x86_64"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Setup cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: |
+          cargo build --release --features gui || true
+          # Build CLI-only binary too (in case GUI fails on some platforms)
+          cargo build --release || true
+
+      - name: Collect artifact
+        run: |
+          mkdir -p artifacts
+          BIN_NAME=timeloop-terminal
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/release/${BIN_NAME}.exe artifacts/${BIN_NAME}-${{ matrix.os }}.exe || true
+          else
+            cp target/release/${BIN_NAME} artifacts/${BIN_NAME}-${{ matrix.os }} || true
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: timeloop-${{ matrix.os }}
+          path: artifacts/*
+
+  create-release:
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Upload release assets (per-file)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPLOAD_URL: ${{ steps.create_release.outputs.upload_url }}
+        run: |
+          set -e
+          cd release-artifacts || exit 0
+          for f in $(ls -1); do
+            echo "Uploading $f..."
+            # upload_url is a template like: https://uploads.github.com/..../assets{?name,label}
+            # We need to strip the template and append ?name=
+            UPLOAD=${UPLOAD_URL%\{*}
+            curl -sS -X POST \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$f" "${UPLOAD}?name=$(basename $f)" || true
+          done

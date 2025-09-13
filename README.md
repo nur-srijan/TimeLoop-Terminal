@@ -2,6 +2,9 @@
 
 > **Your terminal is not just a tool. It's a time machine.**
 
+[![CI](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/ci.yml/badge.svg)](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/ci.yml)
+[![Release](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/release.yml/badge.svg)](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/release.yml)
+
 A superintelligent terminal emulator that records every keystroke, file change, CLI command, and shell state, allowing you to rewind, replay, and branch your coding sessions like a Git repository for your terminal history.
 
 ## Architecture Diagram
@@ -125,6 +128,18 @@ cargo build --release
 
 # Run the terminal
 cargo run
+```
+
+### Run the GUI (optional)
+
+The GUI is provided as an optional binary and requires building with the `gui` feature (it is implemented with `eframe/egui`).
+
+```bash
+# Build with GUI
+cargo build --release --features gui
+
+# Run GUI
+cargo run --bin gui --features gui
 ```
 
 ### Basic Usage
