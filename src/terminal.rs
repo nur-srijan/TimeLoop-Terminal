@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, EventStream};
+use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent};
 use tokio::task::JoinHandle;
 use crate::{EventRecorder, TimeLoopError, FileChangeType};
 use crate::file_watcher::FileWatcher;

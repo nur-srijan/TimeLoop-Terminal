@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::collections::HashMap;
 use notify::{Watcher, RecursiveMode, recommended_watcher};
-use notify::event::{EventKind, ModifyKind, RenameMode};
 use std::sync::mpsc;
 
 use tokio::sync::mpsc as tokio_mpsc;
@@ -164,13 +163,12 @@ impl FileWatcher {
         for path in event.paths {
             let change_type = match event.kind {
                 notify::EventKind::Create(_) => FileChangeType::Created,
-                notify::EventKind::Modify(_) => FileChangeType::Modified,
                 notify::EventKind::Remove(_) => FileChangeType::Deleted,
                 notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
-                    // notify crate currently provides paths in event.paths for rename events as [from, to]
-                    // We will attach the old_path if available when invoking the callback below
+                    // For rename events, capture rename change
                     FileChangeType::Renamed { old_path: String::new() }
                 }
+                notify::EventKind::Modify(_) => FileChangeType::Modified,
                 _ => continue, // Skip other event types
             };
             
@@ -239,4 +237,4 @@ mod tests {
         assert!(file_watcher.should_ignore(&PathBuf::from("temp.tmp")));
         assert!(!file_watcher.should_ignore(&PathBuf::from("temp.txt")));
     }
-} 
+}
