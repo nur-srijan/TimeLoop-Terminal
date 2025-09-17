@@ -52,5 +52,6 @@ tempfile = "3.10"
 
 [features]
 default = []
-ai = ["reqwest"]
-gui = ["eframe"]
+ai = ["dep:reqwest"]
+gui = ["dep:eframe"]
+all = ["dep:reqwest", "dep:eframe"]
