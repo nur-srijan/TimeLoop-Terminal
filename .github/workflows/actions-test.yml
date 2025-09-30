@@ -1,9 +1,7 @@
     name: My Automation Bot
 
     on:
-      push:
-        branches:
-          - main
+      workflow_dispatch: {}
 
     jobs:
       automate-task:
@@ -20,6 +18,7 @@
             run: |
               git config user.name 'github-actions[bot]'
               git config user.email 'github-actions[bot]@users.noreply.github.com'
+              git remote -v
               git add .
               git commit -m "Automated changes by bot"
               git push
