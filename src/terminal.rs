@@ -1,7 +1,12 @@
 use std::process::{Command, Stdio};
 use std::io::{self, Write};
 use std::path::PathBuf;
-use crossterm::terminal::disable_raw_mode;
+use std::collections::VecDeque;
+use crossterm::{
+    terminal::disable_raw_mode,
+    style::{Color, SetForegroundColor, ResetColor},
+    ExecutableCommand,
+};
 use tokio::task::JoinHandle;
 use crate::{EventRecorder, TimeLoopError};
 
@@ -9,6 +14,8 @@ pub struct TerminalEmulator {
     pub(crate) event_recorder: EventRecorder,
     working_directory: String,
     file_watcher_handle: Option<JoinHandle<()>>,
+    // Command history with a maximum size
+    command_history: VecDeque<String>,
 }
 
 impl TerminalEmulator {
@@ -21,6 +28,7 @@ impl TerminalEmulator {
             event_recorder,
             working_directory,
             file_watcher_handle: None,
+            command_history: VecDeque::with_capacity(100), // Store up to 100 commands
         })
     }
 
@@ -30,7 +38,11 @@ impl TerminalEmulator {
         
         // In-memory storage doesn't have database conflicts, but we'll keep file watching disabled for now
         // TODO: Re-implement file watching with in-memory storage
-        println!("📁 File watching started for: {}", self.working_directory);
+        let mut stdout = io::stdout();
+        stdout.execute(SetForegroundColor(Color::Green))?;
+        print!("📁 ");
+        stdout.execute(ResetColor)?;
+        println!("File watching started for: {}", self.working_directory);
         Ok(())
     }
 
@@ -59,18 +71,43 @@ impl TerminalEmulator {
             eprintln!("Warning: Could not start file watching: {}", e);
         }
         
-        // Print welcome message
-        println!("TimeLoop Terminal - PowerShell Mode");
-        println!("Type 'exit' to quit");
-        println!("------------------------------");
+        // Print welcome message with styling
+        let mut stdout = io::stdout();
+        stdout.execute(SetForegroundColor(Color::Cyan))?;
+        println!("╔════════════════════════════════════════════════════╗");
+        println!("║                                                    ║");
+        stdout.execute(SetForegroundColor(Color::Blue))?;
+        
+        if cfg!(target_os = "windows") {
+            println!("║            TimeLoop Terminal - PowerShell          ║");
+        } else {
+            println!("║              TimeLoop Terminal - Bash              ║");
+        }
+        
+        stdout.execute(SetForegroundColor(Color::Cyan))?;
+        println!("║                                                    ║");
+        println!("╚════════════════════════════════════════════════════╝");
+        stdout.execute(ResetColor)?;
+        
+        // Print help info
+        stdout.execute(SetForegroundColor(Color::Yellow))?;
+        println!("Type 'exit' to quit | All shell commands are supported");
+        stdout.execute(ResetColor)?;
+        println!("─────────────────────────────────────────────────────");
         
         // Main loop using standard input
         let stdin = io::stdin();
         let mut stdout = io::stdout();
         
         let result = loop {
-            // Display prompt
-            print!("> ");
+            // Display styled prompt
+            stdout.execute(SetForegroundColor(Color::Green))?;
+            print!("⚡ ");
+            stdout.execute(SetForegroundColor(Color::Blue))?;
+            print!("[{}]", self.working_directory);
+            stdout.execute(SetForegroundColor(Color::Yellow))?;
+            print!(" > ");
+            stdout.execute(ResetColor)?;
             stdout.flush()?;
             
             // Read a line of input
@@ -85,15 +122,94 @@ impl TerminalEmulator {
                 self.event_recorder.record_key_press(&c.to_string())?;
             }
             
-            // Check for exit command
-            if input == "exit" || input == "quit" {
-                println!("👋 Goodbye!");
-                break Ok(());
+            // Skip empty input
+            if input.is_empty() {
+                continue;
             }
             
-            // Execute the command
-            let output = self.execute_external_command(input).await?;
-            self.event_recorder.record_command(input, &output.output, output.exit_code, &self.working_directory)?;
+            // Add command to history if not empty
+            if !input.is_empty() {
+                // Add to history, removing oldest if at capacity
+                if self.command_history.len() >= 100 {
+                    self.command_history.pop_front();
+                }
+                self.command_history.push_back(input.to_string());
+            }
+            
+            // Only handle exit command internally, pass everything else to the shell
+            if input == "exit" || input == "quit" {
+                stdout.execute(SetForegroundColor(Color::Green))?;
+                println!("👋 Goodbye!");
+                stdout.execute(ResetColor)?;
+                break Ok(());
+            } else {
+                // Special handling for directory change commands
+                if input == "cd" || input == "cd ~" {
+                    // Change to home directory
+                    let home = std::env::var("USERPROFILE")
+                        .or_else(|_| std::env::var("HOME"))
+                        .unwrap_or_else(|_| ".".to_string());
+                    
+                    if let Err(e) = std::env::set_current_dir(&home) {
+                        println!("Error changing to home directory: {}", e);
+                    } else {
+                        // Update working directory if successful
+                        if let Ok(new_dir) = std::env::current_dir() {
+                            self.working_directory = new_dir.to_string_lossy().to_string();
+                        }
+                    }
+                } else if input == "cd .." {
+                    // Go up one directory
+                    if let Err(e) = std::env::set_current_dir("..") {
+                        println!("Error going up directory: {}", e);
+                    } else {
+                        // Update working directory if successful
+                        if let Ok(new_dir) = std::env::current_dir() {
+                            self.working_directory = new_dir.to_string_lossy().to_string();
+                        }
+                    }
+                } else if input.starts_with("cd ") {
+                    // Extract the directory path
+                    let path = input.trim_start_matches("cd ").trim();
+                    
+                    // Try to change directory
+                    if let Err(e) = std::env::set_current_dir(path) {
+                        println!("Error changing directory: {}", e);
+                    } else {
+                        // Update working directory if successful
+                        if let Ok(new_dir) = std::env::current_dir() {
+                            self.working_directory = new_dir.to_string_lossy().to_string();
+                        }
+                    }
+                } else if input.starts_with("Set-Location ") || input.starts_with("sl ") || input.starts_with("chdir ") {
+                    // Extract the directory path from the PowerShell command
+                    let path_start = input.find(' ').map(|i| i + 1).unwrap_or(input.len());
+                    let path = input[path_start..].trim();
+                    
+                    // Remove quotes if present
+                    let path = path.trim_start_matches('"').trim_end_matches('"');
+                    
+                    // Try to change directory directly
+                    if let Err(e) = std::env::set_current_dir(path) {
+                        // If direct change fails, execute via PowerShell and show output
+                        let output = self.execute_external_command(input).await?;
+                        self.event_recorder.record_command(input, &output.output, output.exit_code, &self.working_directory)?;
+                        println!("Error changing directory: {}", e);
+                    } else {
+                        // Record the command but don't execute it again
+                        self.event_recorder.record_command(input, "", 0, &self.working_directory)?;
+                        
+                        // Update working directory
+                        if let Ok(new_dir) = std::env::current_dir() {
+                            self.working_directory = new_dir.to_string_lossy().to_string();
+                        }
+                    }
+                } else {
+                    // For all other commands, just execute them normally
+                    let output = self.execute_external_command(input).await?;
+                    self.event_recorder.record_command(input, &output.output, output.exit_code, &self.working_directory)?;
+                }
+            }
         };
         
         // Cleanup: stop file watching
@@ -102,30 +218,19 @@ impl TerminalEmulator {
         disable_raw_mode()?;
         result
     }
-
+    
     async fn execute_external_command(&self, command: &str) -> crate::Result<CommandOutput> {
-        // On Windows, we'll use PowerShell to execute commands for better compatibility
+        // Use the appropriate shell based on the platform
         let mut cmd = if cfg!(target_os = "windows") {
+            // On Windows, use PowerShell with proper arguments to execute commands
             let mut cmd = Command::new("powershell");
-            cmd.args(["-Command", command]);
+            // Use -NoProfile to start faster, -ExecutionPolicy Bypass to allow script execution
+            cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]);
             cmd
         } else {
-            let split_result = shellwords::split(command)
-                .map_err(|e| TimeLoopError::CommandExecution(e.to_string()))?;
-            let args: Vec<&str> = split_result
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
-
-            if args.is_empty() {
-                return Ok(CommandOutput {
-                    output: String::new(),
-                    exit_code: 0,
-                });
-            }
-
-            let mut cmd = Command::new(args[0]);
-            cmd.args(&args[1..]);
+            // On Unix systems, use bash with -c to execute commands
+            let mut cmd = Command::new("bash");
+            cmd.args(["-c", command]);
             cmd
         };
         
