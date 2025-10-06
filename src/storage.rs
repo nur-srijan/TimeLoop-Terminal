@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write as _;
 use std::sync::{RwLock, Arc};
+use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -19,24 +20,41 @@ struct StorageInner {
 static GLOBAL_STORAGE: Lazy<RwLock<StorageInner>> = Lazy::new(|| RwLock::new(StorageInner::default()));
 
 pub struct Storage {
-    // When `inner` is None, operations go to the global singleton (and persist to disk).
-    // When `inner` is Some(...), this Storage instance is isolated (in-memory only).
+    // When `inner` is None, operations go to the global singleton (and persist to the global location).
+    // When `inner` is Some(...), this Storage instance operates on an independent in-memory store and
+    // may optionally persist to the specified `persistence_path`.
     inner: Option<Arc<RwLock<StorageInner>>>,
-
+    persistence_path: Option<PathBuf>,
 }
 
 impl Storage {
     pub fn new() -> crate::Result<Self> {
         // Best-effort load persisted state for the global storage
         let _ = Self::load_from_disk();
-        Ok(Self { inner: None })
+        Ok(Self { inner: None, persistence_path: None })
     }
 
-    // `with_path` creates an isolated in-memory storage for the given path (tests use this
-    // to avoid clobbering global disk-backed storage). We intentionally ignore the path
-    // for persistence and provide an in-memory-only store.
-    pub fn with_path(_path: &str) -> crate::Result<Self> {
-        Ok(Self { inner: Some(Arc::new(RwLock::new(StorageInner::default()))) })
+    // `with_path` creates an isolated storage instance whose state is stored in the
+    // provided path. If the path exists it will be loaded into memory; mutations on
+    // the Storage instance will be persisted to that path. This is useful for
+    // integration tests that need on-disk isolation.
+    pub fn with_path(path: &str) -> crate::Result<Self> {
+        let pb = PathBuf::from(path);
+        let inner = Arc::new(RwLock::new(StorageInner::default()));
+        let storage = Self { inner: Some(inner.clone()), persistence_path: Some(pb.clone()) };
+
+        // If the file exists, load it into the per-instance inner store
+        if pb.exists() {
+            if let Ok(data) = std::fs::read_to_string(&pb) {
+                if let Ok(inner_data) = serde_json::from_str::<StorageInner>(&data) {
+                    if let Ok(mut guard) = inner.write() {
+                        *guard = inner_data;
+                    }
+                }
+            }
+        }
+
+        Ok(storage)
     }
 
     pub fn get_db_path() -> crate::Result<std::path::PathBuf> {
@@ -76,8 +94,10 @@ impl Storage {
             let session_events = guard.events.entry(event.session_id.clone()).or_insert_with(Vec::new);
             session_events.push(event.clone());
         })?;
-        // Persist only when using the global storage
-        if self.inner.is_none() {
+        // Persist if global storage is used, or if this instance has a persistence path
+        if let Some(path) = &self.persistence_path {
+            let _ = Self::save_to_path(path, self);
+        } else if self.inner.is_none() {
             let _ = Self::save_to_disk();
         }
         Ok(())
@@ -102,7 +122,9 @@ impl Storage {
         self.with_write(|guard| {
             guard.events.remove(session_id);
         })?;
-        if self.inner.is_none() {
+        if let Some(path) = &self.persistence_path {
+            let _ = Self::save_to_path(path, self);
+        } else if self.inner.is_none() {
             let _ = Self::save_to_disk();
         }
         Ok(())
@@ -113,7 +135,9 @@ impl Storage {
         self.with_write(|guard| {
             guard.sessions.insert(session.id.clone(), session.clone());
         })?;
-        if self.inner.is_none() {
+        if let Some(path) = &self.persistence_path {
+            let _ = Self::save_to_path(path, self);
+        } else if self.inner.is_none() {
             let _ = Self::save_to_disk();
         }
         Ok(())
@@ -136,7 +160,9 @@ impl Storage {
         self.with_write(|guard| {
             guard.branches.insert(branch.id.clone(), branch.clone());
         })?;
-        if self.inner.is_none() {
+        if let Some(path) = &self.persistence_path {
+            let _ = Self::save_to_path(path, self);
+        } else if self.inner.is_none() {
             let _ = Self::save_to_disk();
         }
         Ok(())
@@ -159,7 +185,9 @@ impl Storage {
             guard.events.remove(session_id);
             guard.sessions.remove(session_id);
         })?;
-        if self.inner.is_none() {
+        if let Some(path) = &self.persistence_path {
+            let _ = Self::save_to_path(path, self);
+        } else if self.inner.is_none() {
             let _ = Self::save_to_disk();
         }
         Ok(())
@@ -170,7 +198,9 @@ impl Storage {
             guard.events.remove(branch_id);
             guard.branches.remove(branch_id);
         })?;
-        if self.inner.is_none() {
+        if let Some(path) = &self.persistence_path {
+            let _ = Self::save_to_path(path, self);
+        } else if self.inner.is_none() {
             let _ = Self::save_to_disk();
         }
         Ok(())
@@ -239,6 +269,26 @@ impl Storage {
         let inner: StorageInner = serde_json::from_str(&data)?;
         let mut guard = GLOBAL_STORAGE.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
         *guard = inner;
+        Ok(())
+    }
+
+    // Save to a per-instance path. Serialize the current inner state (either global
+    // or the instance's inner) and write it to the provided path.
+    fn save_to_path(path: &PathBuf, storage: &Storage) -> crate::Result<()> {
+        // Determine which inner to read from
+        let data_inner = if let Some(inner) = &storage.inner {
+            inner.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?.clone()
+        } else {
+            GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?.clone()
+        };
+
+        // Ensure parent dir exists
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        }
+
+        let data = serde_json::to_string_pretty(&data_inner)?;
+        fs::write(path, data).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         Ok(())
     }
 
