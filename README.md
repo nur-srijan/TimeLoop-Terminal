@@ -2,7 +2,94 @@
 
 > **Your terminal is not just a tool. It's a time machine.**
 
+[![CodeQL](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/codeql.yml/badge.svg)](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/codeql.yml)
+[![CI](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/ci.yml/badge.svg)](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/ci.yml)
+[![Release](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/release.yml/badge.svg)](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/release.yml)
+
 A superintelligent terminal emulator that records every keystroke, file change, CLI command, and shell state, allowing you to rewind, replay, and branch your coding sessions like a Git repository for your terminal history.
+
+## Architecture Diagram
+
+```mermaid
+flowchart TD
+    CLI["CLI Layer"]:::api
+    API["Public Library API"]:::api
+    Terminal["Terminal Emulator"]:::infra
+    FileWatcher["File Watcher"]:::infra
+    Recorder["Event Recorder"]:::core
+    Session["Session Lifecycle"]:::core
+    Storage["Storage Engine"]:::infra
+    Replay["Replay Engine"]:::core
+    Branch["Branch Manager"]:::core
+    Error["Error Handler"]:::error
+    ExternalFS["Local File System"]:::external
+    Crossterm["crossterm"]:::external
+    SledDB["sled DB"]:::external
+    UserShell["User Shell"]:::external
+
+    %% CLI to API
+    CLI -->|"commands (start/stop/list/replay/branch)"| API
+
+    %% API routes to domain components
+    API --> Recorder
+    API --> Session
+    API --> Replay
+    API --> Branch
+
+    %% User input flow
+    UserShell -->|"keystroke/input"| Terminal
+    Terminal -->|"crossterm calls"| Crossterm
+    Terminal -->|"emit events"| Recorder
+
+    %% File watcher flow
+    ExternalFS --> FileWatcher
+    FileWatcher -->|"file change events"| Recorder
+
+    %% Recording to storage
+    Recorder -->|"append events"| Storage
+    Session -->|"session metadata"| Storage
+
+    %% Replay flow
+    Replay -->|"read events"| Storage
+    Replay -->|"render playback"| Terminal
+
+    %% Branch management
+    Branch -->|"read/write branch metadata"| Storage
+    Storage -->|"branch data"| Branch
+
+    %% Error handling cross-cutting
+    Recorder -->|"errors"| Error
+    Session -->|"errors"| Error
+    Terminal -->|"errors"| Error
+    FileWatcher -->|"errors"| Error
+    Storage -->|"errors"| Error
+    Replay -->|"errors"| Error
+    Branch -->|"errors"| Error
+    API -->|"errors"| Error
+    CLI -->|"errors"| Error
+
+    %% External DB integration
+    Storage --> SledDB
+
+    %% Legend grouping (not clickable)
+    classDef core fill:#fbb,stroke:#333,stroke-width:1px
+    classDef infra fill:#bbf,stroke:#333,stroke-width:1px
+    classDef api fill:#bfb,stroke:#333,stroke-width:1px
+    classDef external fill:#ccc,stroke:#333,stroke-width:1px
+    classDef error fill:#f99,stroke:#333,stroke-width:1px
+
+    %% Click events
+    click CLI "https://github.com/nur-srijan/timeloop-terminal/blob/main/src/main.rs"
+    click API "https://github.com/nur-srijan/timeloop-terminal/blob/main/src/lib.rs"
+    click Error "https://github.com/nur-srijan/timeloop-terminal/blob/main/src/error.rs"
+    click Recorder "https://github.com/nur-srijan/timeloop-terminal/blob/main/src/events.rs"
+    click Session "https://github.com/nur-srijan/timeloop-terminal/blob/main/src/session.rs"
+    click FileWatcher "https://github.com/nur-srijan/timeloop-terminal/blob/main/src/file_watcher.rs"
+    click Storage "https://github.com/nur-srijan/timeloop-terminal/blob/main/src/storage.rs"
+    click Replay "https://github.com/nur-srijan/timeloop-terminal/blob/main/src/replay.rs"
+    click Branch "https://github.com/nur-srijan/timeloop-terminal/blob/main/src/branch.rs"
+    click Terminal "https://github.com/nur-srijan/timeloop-terminal/blob/main/src/terminal.rs"
+```
 
 ## ✨ Features
 
@@ -42,6 +129,18 @@ cargo build --release
 
 # Run the terminal
 cargo run
+```
+
+### Run the GUI (optional)
+
+The GUI is provided as an optional binary and requires building with the `gui` feature (it is implemented with `eframe/egui`).
+
+```bash
+# Build with GUI
+cargo build --release --features gui
+
+# Run GUI
+cargo run --bin gui --features gui
 ```
 
 ### Basic Usage
@@ -108,6 +207,8 @@ timeloop summary <session-id>
 
 ```
 src/
+├── bin/
+|   └── gui.rs       # (Optional) Graphical interface
 ├── main.rs          # CLI entry point
 ├── lib.rs           # Library exports
 ├── error.rs         # Error handling

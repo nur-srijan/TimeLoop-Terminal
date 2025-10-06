@@ -6,6 +6,8 @@ pub mod replay;
 pub mod branch;
 pub mod storage;
 pub mod file_watcher;
+#[cfg(feature = "ai")]
+pub mod ai;
 
 pub use error::TimeLoopError;
 pub use session::{SessionManager, Session, SessionSummary};

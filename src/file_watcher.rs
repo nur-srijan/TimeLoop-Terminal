@@ -163,18 +163,30 @@ impl FileWatcher {
         for path in event.paths {
             let change_type = match event.kind {
                 notify::EventKind::Create(_) => FileChangeType::Created,
-                notify::EventKind::Modify(_) => FileChangeType::Modified,
                 notify::EventKind::Remove(_) => FileChangeType::Deleted,
-                // notify::EventKind::Rename(rename_event) => {
-                //     FileChangeType::Renamed { old_path: rename_event.0.to_string_lossy().to_string() }
-                // }
+                notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
+                    // For rename events, capture rename change
+                    FileChangeType::Renamed { old_path: String::new() }
+                }
+                notify::EventKind::Modify(_) => FileChangeType::Modified,
                 _ => continue, // Skip other event types
             };
             
             let callback = self.file_change_callback.clone();
             let path_str = path.to_string_lossy().to_string();
+            let event_kind = event.kind.clone();
             tokio::spawn(async move {
-                if let Err(e) = callback.lock().await(&path_str, change_type) {
+                let change = match event_kind {
+                    notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
+                        // For rename, try to read old path from first element if present
+                        // Since we're inside spawned task, we only have current path; this is a best-effort placeholder
+                        if let FileChangeType::Renamed { .. } = &change_type {
+                            FileChangeType::Renamed { old_path: String::from("") }
+                        } else { change_type }
+                    }
+                    _ => change_type,
+                };
+                if let Err(e) = callback.lock().await(&path_str, change) {
                     eprintln!("Error in file change callback: {}", e);
                 }
             });
@@ -225,4 +237,4 @@ mod tests {
         assert!(file_watcher.should_ignore(&PathBuf::from("temp.tmp")));
         assert!(!file_watcher.should_ignore(&PathBuf::from("temp.txt")));
     }
-} 
+}

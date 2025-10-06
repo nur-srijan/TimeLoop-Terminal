@@ -2,16 +2,19 @@ use std::process::{Command, Stdio};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use crossterm::{
     terminal::disable_raw_mode,
     style::{Color, SetForegroundColor, ResetColor},
     ExecutableCommand,
+    event::{self, Event as CEvent, KeyCode, KeyEvent},
 };
 use tokio::task::JoinHandle;
-use crate::{EventRecorder, TimeLoopError};
+use crate::{EventRecorder, TimeLoopError, FileChangeType};
+use crate::file_watcher::FileWatcher;
 
 pub struct TerminalEmulator {
-    pub(crate) event_recorder: EventRecorder,
+    pub(crate) event_recorder: Arc<Mutex<EventRecorder>>,
     working_directory: String,
     file_watcher_handle: Option<JoinHandle<()>>,
     // Command history with a maximum size
@@ -25,7 +28,7 @@ impl TerminalEmulator {
             .to_string();
         
         Ok(Self {
-            event_recorder,
+            event_recorder: Arc::new(Mutex::new(event_recorder)),
             working_directory,
             file_watcher_handle: None,
             command_history: VecDeque::with_capacity(100), // Store up to 100 commands
@@ -34,15 +37,44 @@ impl TerminalEmulator {
 
     /// Start file watching for the current directory
     pub(crate) async fn start_file_watching(&mut self) -> crate::Result<()> {
-        let _current_dir = PathBuf::from(&self.working_directory);
-        
-        // In-memory storage doesn't have database conflicts, but we'll keep file watching disabled for now
-        // TODO: Re-implement file watching with in-memory storage
-        let mut stdout = io::stdout();
-        stdout.execute(SetForegroundColor(Color::Green))?;
-        print!("📁 ");
-        stdout.execute(ResetColor)?;
-        println!("File watching started for: {}", self.working_directory);
+        let watch_path = PathBuf::from(&self.working_directory);
+        let recorder = self.event_recorder.clone();
+        println!("📁 File watching started for: {}", self.working_directory);
+
+        let handle = tokio::spawn(async move {
+            // Create callback closure to record file changes
+            let cb: crate::file_watcher::FileChangeCallback = {
+                let recorder = recorder.clone();
+                Arc::new(tokio::sync::Mutex::new(move |path: &str, change: FileChangeType| {
+                    // Synchronous closure: use std::sync::Mutex to mutate recorder
+                    if let Ok(mut guard) = recorder.lock() {
+                        if let Err(e) = guard.record_file_change(path, change) {
+                            eprintln!("Error recording file change: {}", e);
+                        }
+                    }
+                    Ok(())
+                }))
+            };
+
+            let mut watcher = match FileWatcher::new(cb) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("Failed to init file watcher: {}", e);
+                    return;
+                }
+            };
+
+            if let Err(e) = watcher.add_watch_path(watch_path.clone(), true) {
+                eprintln!("Failed to add watch path: {}", e);
+                return;
+            }
+
+            if let Err(e) = watcher.start_watching().await {
+                eprintln!("File watching stopped with error: {}", e);
+            }
+        });
+
+        self.file_watcher_handle = Some(handle);
         Ok(())
     }
 
@@ -59,12 +91,14 @@ impl TerminalEmulator {
     }
 
     pub async fn run(&mut self) -> crate::Result<()> {
-        // Use standard input mode instead of raw mode
-        // This should avoid the character duplication issues
-        
+        // Enable raw mode to capture keystrokes and resize events
+        enable_raw_mode()?;
+
         // Record initial terminal state
         let (cols, rows) = crossterm::terminal::size()?;
-        self.event_recorder.record_terminal_state((0, 0), (cols, rows))?;
+        if let Ok(mut guard) = self.event_recorder.lock() {
+            guard.record_terminal_state((0, 0), (cols, rows))?;
+        }
         
         // Start file watching
         if let Err(e) = self.start_file_watching().await {
