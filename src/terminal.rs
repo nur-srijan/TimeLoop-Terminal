@@ -4,10 +4,9 @@ use std::path::PathBuf;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use crossterm::{
-    terminal::disable_raw_mode,
+    terminal::{disable_raw_mode, enable_raw_mode},
     style::{Color, SetForegroundColor, ResetColor},
     ExecutableCommand,
-    event::{self, Event as CEvent, KeyCode, KeyEvent},
 };
 use tokio::task::JoinHandle;
 use crate::{EventRecorder, TimeLoopError, FileChangeType};
@@ -152,8 +151,10 @@ impl TerminalEmulator {
             let input = input.trim();
             
             // Record the command
-            for c in input.chars() {
-                self.event_recorder.record_key_press(&c.to_string())?;
+            if let Ok(mut guard) = self.event_recorder.lock() {
+                for c in input.chars() {
+                    guard.record_key_press(&c.to_string())?;
+                }
             }
             
             // Skip empty input
@@ -227,11 +228,15 @@ impl TerminalEmulator {
                     if let Err(e) = std::env::set_current_dir(path) {
                         // If direct change fails, execute via PowerShell and show output
                         let output = self.execute_external_command(input).await?;
-                        self.event_recorder.record_command(input, &output.output, output.exit_code, &self.working_directory)?;
+                        if let Ok(mut guard) = self.event_recorder.lock() {
+                            guard.record_command(input, &output.output, output.exit_code, &self.working_directory)?;
+                        }
                         println!("Error changing directory: {}", e);
                     } else {
                         // Record the command but don't execute it again
-                        self.event_recorder.record_command(input, "", 0, &self.working_directory)?;
+                        if let Ok(mut guard) = self.event_recorder.lock() {
+                            guard.record_command(input, "", 0, &self.working_directory)?;
+                        }
                         
                         // Update working directory
                         if let Ok(new_dir) = std::env::current_dir() {
@@ -241,7 +246,9 @@ impl TerminalEmulator {
                 } else {
                     // For all other commands, just execute them normally
                     let output = self.execute_external_command(input).await?;
-                    self.event_recorder.record_command(input, &output.output, output.exit_code, &self.working_directory)?;
+                    if let Ok(mut guard) = self.event_recorder.lock() {
+                        guard.record_command(input, &output.output, output.exit_code, &self.working_directory)?;
+                    }
                 }
             }
         };
@@ -305,7 +312,6 @@ struct CommandOutput {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use std::fs;
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]
@@ -343,4 +349,4 @@ mod tests {
         // If we get here, the test passes
         assert!(true);
     }
-} 
+}

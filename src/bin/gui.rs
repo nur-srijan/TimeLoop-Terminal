@@ -1,7 +1,7 @@
+#![cfg(feature = "gui")]
+
 use eframe::{egui, epi};
-use timeloop_terminal::{SessionManager, ReplayEngine, Storage, SessionSummary};
-use std::sync::{Arc, Mutex};
-use chrono::Utc;
+use timeloop_terminal::{SessionManager, ReplayEngine};
 
 // Minimal GUI app that lists sessions and shows summary + simple replay controls
 struct TimeLoopGui {

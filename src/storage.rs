@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write as _;
-use std::sync::RwLock;
+use std::sync::{RwLock, Arc};
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -18,33 +18,73 @@ struct StorageInner {
 
 static GLOBAL_STORAGE: Lazy<RwLock<StorageInner>> = Lazy::new(|| RwLock::new(StorageInner::default()));
 
-pub struct Storage;
+pub struct Storage {
+    // When `inner` is None, operations go to the global singleton (and persist to disk).
+    // When `inner` is Some(...), this Storage instance is isolated (in-memory only).
+    inner: Option<Arc<RwLock<StorageInner>>>,
+
+}
 
 impl Storage {
     pub fn new() -> crate::Result<Self> {
-        // Best-effort load persisted state
+        // Best-effort load persisted state for the global storage
         let _ = Self::load_from_disk();
-        Ok(Self)
+        Ok(Self { inner: None })
     }
 
-    pub fn with_path(_path: &str) -> crate::Result<Self> { Self::new() }
+    // `with_path` creates an isolated in-memory storage for the given path (tests use this
+    // to avoid clobbering global disk-backed storage). We intentionally ignore the path
+    // for persistence and provide an in-memory-only store.
+    pub fn with_path(_path: &str) -> crate::Result<Self> {
+        Ok(Self { inner: Some(Arc::new(RwLock::new(StorageInner::default()))) })
+    }
 
     pub fn get_db_path() -> crate::Result<std::path::PathBuf> {
         Ok(std::path::PathBuf::from("/tmp/timeloop-memory"))
     }
 
+    // Helper to run read-only closures against the correct storage instance
+    fn with_read<F, R>(&self, f: F) -> crate::Result<R>
+    where
+        F: FnOnce(&StorageInner) -> R,
+    {
+        if let Some(inner) = &self.inner {
+            let guard = inner.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+            Ok(f(&*guard))
+        } else {
+            let guard = GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+            Ok(f(&*guard))
+        }
+    }
+
+    // Helper to run write closures against the correct storage instance
+    fn with_write<F, R>(&self, f: F) -> crate::Result<R>
+    where
+        F: FnOnce(&mut StorageInner) -> R,
+    {
+        if let Some(inner) = &self.inner {
+            let mut guard = inner.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+            Ok(f(&mut *guard))
+        } else {
+            let mut guard = GLOBAL_STORAGE.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+            Ok(f(&mut *guard))
+        }
+    }
+
     pub fn store_event(&self, event: &Event) -> crate::Result<()> {
-        let mut guard = GLOBAL_STORAGE.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-        let session_events = guard.events.entry(event.session_id.clone()).or_insert_with(Vec::new);
-        session_events.push(event.clone());
-        drop(guard);
-        let _ = Self::save_to_disk();
+        self.with_write(|guard| {
+            let session_events = guard.events.entry(event.session_id.clone()).or_insert_with(Vec::new);
+            session_events.push(event.clone());
+        })?;
+        // Persist only when using the global storage
+        if self.inner.is_none() {
+            let _ = Self::save_to_disk();
+        }
         Ok(())
     }
 
     pub fn get_events_for_session(&self, session_id: &str) -> crate::Result<Vec<Event>> {
-        let guard = GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-        Ok(guard.events.get(session_id).cloned().unwrap_or_default())
+        self.with_read(|guard| guard.events.get(session_id).cloned().unwrap_or_default())
     }
 
     pub fn get_events_in_range(&self, session_id: &str, start: DateTime<Utc>, end: DateTime<Utc>) -> crate::Result<Vec<Event>> {
@@ -59,70 +99,80 @@ impl Storage {
     }
 
     pub fn clear_session_events(&self, session_id: &str) -> crate::Result<()> {
-        let mut guard = GLOBAL_STORAGE.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-        guard.events.remove(session_id);
-        drop(guard);
-        let _ = Self::save_to_disk();
+        self.with_write(|guard| {
+            guard.events.remove(session_id);
+        })?;
+        if self.inner.is_none() {
+            let _ = Self::save_to_disk();
+        }
         Ok(())
     }
 
     // Session management
     pub fn store_session(&self, session: &Session) -> crate::Result<()> {
-        let mut guard = GLOBAL_STORAGE.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-        guard.sessions.insert(session.id.clone(), session.clone());
-        drop(guard);
-        let _ = Self::save_to_disk();
+        self.with_write(|guard| {
+            guard.sessions.insert(session.id.clone(), session.clone());
+        })?;
+        if self.inner.is_none() {
+            let _ = Self::save_to_disk();
+        }
         Ok(())
     }
 
     pub fn get_session(&self, session_id: &str) -> crate::Result<Option<Session>> {
-        let guard = GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-        Ok(guard.sessions.get(session_id).cloned())
+        self.with_read(|guard| guard.sessions.get(session_id).cloned())
     }
 
     pub fn list_sessions(&self) -> crate::Result<Vec<Session>> {
-        let guard = GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-        let mut sessions: Vec<Session> = guard.sessions.values().cloned().collect();
-        sessions.sort_by_key(|s| s.created_at);
-        Ok(sessions)
+        self.with_read(|guard| {
+            let mut sessions: Vec<Session> = guard.sessions.values().cloned().collect();
+            sessions.sort_by_key(|s| s.created_at);
+            sessions
+        })
     }
 
     // Branch management
     pub fn store_branch(&self, branch: &TimelineBranch) -> crate::Result<()> {
-        let mut guard = GLOBAL_STORAGE.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-        guard.branches.insert(branch.id.clone(), branch.clone());
-        drop(guard);
-        let _ = Self::save_to_disk();
+        self.with_write(|guard| {
+            guard.branches.insert(branch.id.clone(), branch.clone());
+        })?;
+        if self.inner.is_none() {
+            let _ = Self::save_to_disk();
+        }
         Ok(())
     }
 
     pub fn get_branch(&self, branch_id: &str) -> crate::Result<Option<TimelineBranch>> {
-        let guard = GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-        Ok(guard.branches.get(branch_id).cloned())
+        self.with_read(|guard| guard.branches.get(branch_id).cloned())
     }
 
     pub fn list_branches(&self) -> crate::Result<Vec<TimelineBranch>> {
-        let guard = GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-        let mut branches: Vec<TimelineBranch> = guard.branches.values().cloned().collect();
-        branches.sort_by_key(|b| b.created_at);
-        Ok(branches)
+        self.with_read(|guard| {
+            let mut branches: Vec<TimelineBranch> = guard.branches.values().cloned().collect();
+            branches.sort_by_key(|b| b.created_at);
+            branches
+        })
     }
 
     pub fn delete_session(&self, session_id: &str) -> crate::Result<()> {
-        let mut guard = GLOBAL_STORAGE.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-        guard.events.remove(session_id);
-        guard.sessions.remove(session_id);
-        drop(guard);
-        let _ = Self::save_to_disk();
+        self.with_write(|guard| {
+            guard.events.remove(session_id);
+            guard.sessions.remove(session_id);
+        })?;
+        if self.inner.is_none() {
+            let _ = Self::save_to_disk();
+        }
         Ok(())
     }
 
     pub fn delete_branch(&self, branch_id: &str) -> crate::Result<()> {
-        let mut guard = GLOBAL_STORAGE.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-        guard.events.remove(branch_id);
-        guard.branches.remove(branch_id);
-        drop(guard);
-        let _ = Self::save_to_disk();
+        self.with_write(|guard| {
+            guard.events.remove(branch_id);
+            guard.branches.remove(branch_id);
+        })?;
+        if self.inner.is_none() {
+            let _ = Self::save_to_disk();
+        }
         Ok(())
     }
 
@@ -211,7 +261,7 @@ mod tests {
 
     #[test]
     fn test_in_memory_storage() {
-        let mut storage = Storage::new().unwrap();
+        let storage = Storage::with_path("test-in-memory").unwrap();
         
         // Test session storage
         let session = Session {
