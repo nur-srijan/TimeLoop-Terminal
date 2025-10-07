@@ -26,6 +26,14 @@ struct Cli {
     #[arg(short, long)]
     replay: bool,
 
+    /// Persistence format (json|cbor)
+    #[arg(long)]
+    persistence_format: Option<String>,
+
+    /// Enable append-only event logging to reduce memory usage
+    #[arg(long, default_value_t = false)]
+    append_events: bool,
+
     /// Branch from a specific session ID
     #[arg(short, long)]
     branch: Option<String>,
@@ -136,6 +144,16 @@ async fn main() -> Result<(), TimeLoopError> {
     
     let cli = Cli::parse();
     
+    // Apply persistence-related global flags early so Storage::new() uses them
+    if let Some(fmt) = &cli.persistence_format {
+        match fmt.as_str() {
+            "json" => timeloop_terminal::storage::Storage::set_global_persistence_format(timeloop_terminal::storage::PersistenceFormat::Json),
+            "cbor" => timeloop_terminal::storage::Storage::set_global_persistence_format(timeloop_terminal::storage::PersistenceFormat::Cbor),
+            other => return Err(TimeLoopError::Configuration(format!("Unknown persistence format: {}", other))),
+        }
+    }
+    timeloop_terminal::storage::Storage::set_global_append_only(cli.append_events);
+
     match &cli.command {
         Some(Commands::Start { name }) => {
             let session_name = name.as_deref().unwrap_or("default");

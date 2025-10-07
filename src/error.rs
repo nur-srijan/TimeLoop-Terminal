@@ -19,6 +19,8 @@ pub enum TimeLoopError {
     
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("CBOR serialization error: {0}")]
+    SerializationCbor(#[from] serde_cbor::Error),
     
     #[error("Event recording error: {0}")]
     EventRecording(String),
