@@ -26,6 +26,23 @@ struct StorageInner {
 
 static GLOBAL_STORAGE: Lazy<RwLock<StorageInner>> = Lazy::new(|| RwLock::new(StorageInner::default()));
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Argon2Config {
+    pub memory_kib: u32,
+    pub iterations: u32,
+    pub parallelism: u32,
+}
+
+impl Default for Argon2Config {
+    fn default() -> Self {
+        Self {
+            memory_kib: 65536, // 64 MiB
+            iterations: 3,
+            parallelism: 1,
+        }
+    }
+}
+
 pub struct Storage {
     // When `inner` is None, operations go to the global singleton (and persist to the global location).
     // When `inner` is Some(...), this Storage instance operates on an independent in-memory store and
@@ -35,13 +52,15 @@ pub struct Storage {
     // Encryption support
     encryption_key: Option<[u8; 32]>,
     encryption_salt: Option<Vec<u8>>,
+    // Argon2 params used to derive keys for this storage instance
+    argon2_config: Option<Argon2Config>,
 }
 
 impl Storage {
     pub fn new() -> crate::Result<Self> {
         // Best-effort load persisted state for the global storage
         let _ = Self::load_from_disk();
-        Ok(Self { inner: None, persistence_path: None, encryption_key: None, encryption_salt: None })
+        Ok(Self { inner: None, persistence_path: None, encryption_key: None, encryption_salt: None, argon2_config: None })
     }
 
     // `with_path` creates an isolated storage instance whose state is stored in the
@@ -51,7 +70,7 @@ impl Storage {
     pub fn with_path(path: &str) -> crate::Result<Self> {
         let pb = PathBuf::from(path);
         let inner = Arc::new(RwLock::new(StorageInner::default()));
-        let storage = Self { inner: Some(inner.clone()), persistence_path: Some(pb.clone()), encryption_key: None, encryption_salt: None };
+        let storage = Self { inner: Some(inner.clone()), persistence_path: Some(pb.clone()), encryption_key: None, encryption_salt: None, argon2_config: None };
 
         // If the file exists, load it into the per-instance inner store
         if pb.exists() {
@@ -71,6 +90,11 @@ impl Storage {
     /// If the file exists it will be decrypted with the derived key. If not, a new
     /// salt is generated and used for subsequent writes.
     pub fn with_encryption(path: &str, passphrase: &str) -> crate::Result<Self> {
+        let default_params = Argon2Config::default();
+        Self::with_encryption_with_params(path, passphrase, &default_params)
+    }
+
+    pub fn with_encryption_with_params(path: &str, passphrase: &str, params: &Argon2Config) -> crate::Result<Self> {
         let pb = PathBuf::from(path);
         let inner = Arc::new(RwLock::new(StorageInner::default()));
 
@@ -83,7 +107,7 @@ impl Storage {
                 if let Ok(wrapper) = serde_json::from_str::<EncryptedFile>(&wrapper_str) {
                     if let Ok(salt_bytes) = general_purpose::STANDARD.decode(&wrapper.salt) {
                         // derive key using passphrase and salt
-                        let key = Self::derive_key(passphrase, &salt_bytes);
+                        let key = Self::derive_key_with_params(passphrase, &salt_bytes, Some(params));
                         // attempt decryption to ensure key is correct
                         if let Ok(ciphertext) = general_purpose::STANDARD.decode(&wrapper.ciphertext) {
                             if let Ok(nonce_bytes) = general_purpose::STANDARD.decode(&wrapper.nonce) {
@@ -111,12 +135,12 @@ impl Storage {
             let mut salt = vec![0u8; 16];
             let mut osrng = rand::rngs::OsRng;
             osrng.fill_bytes(&mut salt);
-            let key = Self::derive_key(passphrase, &salt);
+            let key = Self::derive_key_with_params(passphrase, &salt, Some(params));
             encryption_key = Some(key);
             encryption_salt = Some(salt);
         }
 
-        Ok(Self { inner: Some(inner), persistence_path: Some(pb), encryption_key, encryption_salt })
+        Ok(Self { inner: Some(inner), persistence_path: Some(pb), encryption_key, encryption_salt, argon2_config: Some(params.clone()) })
     }
 
     pub fn get_db_path() -> crate::Result<std::path::PathBuf> {
@@ -387,9 +411,10 @@ impl Storage {
             GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?.clone()
         };
 
-        let data = serde_json::to_string_pretty(&data_inner)?;
-        // If encryption is enabled on this storage, encrypt the blob and write a wrapper
-        if let Some(key) = &storage.encryption_key {
+        let mut data = serde_json::to_string_pretty(&data_inner)?;
+        let mut data_bytes = data.clone().into_bytes();
+         // If encryption is enabled on this storage, encrypt the blob and write a wrapper
+         if let Some(key) = &storage.encryption_key {
             // reuse salt if present
             let salt = storage.encryption_salt.as_ref().ok_or_else(|| crate::error::TimeLoopError::Configuration("Missing salt for encrypted storage".to_string()))?;
             let (nonce, ciphertext) = Self::encrypt_bytes(key, data.as_bytes())?;
@@ -400,13 +425,16 @@ impl Storage {
             };
             let wrapper_json = serde_json::to_string_pretty(&wrapper)?;
             Self::atomic_write(path, wrapper_json.as_bytes())?;
-        } else {
+            // zeroize plaintext
+            data_bytes.zeroize();
+         } else {
             // Perform an atomic write: write to a temp file and rename into place. This
             // reduces the chance of file corruption if the process is interrupted while
             // writing. Note: on some platforms rename over an existing file may not be
             // atomic across filesystems; avoid sharing the same file across mounts.
-            Self::atomic_write(path, data.as_bytes())?;
-        }
+            Self::atomic_write(path, data_bytes.as_slice())?;
+            data_bytes.zeroize();
+         }
         Ok(())
     }
 
@@ -434,14 +462,64 @@ impl Storage {
     }
 
     // Derive a 32-byte key from passphrase + salt using PBKDF2-HMAC-SHA256
-    fn derive_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
+    fn derive_key_with_params(passphrase: &str, salt: &[u8], params: Option<&Argon2Config>) -> [u8; 32] {
+        let config = params.cloned().unwrap_or_default();
         let mut key = [0u8; 32];
-        // Use Argon2id via the argon2 crate with default parameters; it's stronger
-        // than PBKDF2 for password-based key derivation and provides memory-hardness.
-        let argon = Argon2::default();
-        // hash_password_into returns Result<(), _>
+        use argon2::{Algorithm, Version, Params};
+        let params = Params::new(config.memory_kib, config.iterations, config.parallelism, None).expect("invalid argon2 params");
+        let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         argon.hash_password_into(passphrase.as_bytes(), salt, &mut key).expect("Argon2 key derivation failed");
         key
+    }
+
+    /// Change the passphrase used to encrypt the storage. When called, the current
+    /// in-memory state is re-encrypted with a new salt derived from `new_passphrase`.
+    /// The old key material is zeroized.
+    pub fn change_passphrase(&mut self, new_passphrase: &str) -> crate::Result<()> {
+        let path = self.persistence_path.as_ref().ok_or_else(|| crate::error::TimeLoopError::Configuration("change_passphrase requires a persisted storage path".to_string()))?;
+
+        // Determine current inner state
+        let data_inner = if let Some(inner) = &self.inner {
+            inner.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?.clone()
+        } else {
+            GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?.clone()
+        };
+
+        // Serialize into bytes then encrypt with a newly-derived key
+        let mut data_bytes = serde_json::to_vec_pretty(&data_inner)?;
+
+        // Generate new salt and derive new key
+        let mut salt = vec![0u8; 16];
+        let mut osrng = rand::rngs::OsRng;
+        osrng.fill_bytes(&mut salt);
+        let new_key = Self::derive_key_with_params(new_passphrase, &salt, self.argon2_config.as_ref());
+
+        // Encrypt
+        let (nonce, ciphertext) = Self::encrypt_bytes(&new_key, &data_bytes)?;
+
+        // Zeroize plaintext bytes now that we've encrypted
+        data_bytes.zeroize();
+
+        // Build wrapper and write atomically
+        let wrapper = EncryptedFile {
+            salt: general_purpose::STANDARD.encode(&salt),
+            nonce: general_purpose::STANDARD.encode(&nonce),
+            ciphertext: general_purpose::STANDARD.encode(&ciphertext),
+        };
+        let wrapper_json = serde_json::to_string_pretty(&wrapper)?;
+        Self::atomic_write(path, wrapper_json.as_bytes())?;
+
+        // Zeroize and replace old key material
+        if let Some(mut old_key) = self.encryption_key.take() {
+            old_key.zeroize();
+        }
+        if let Some(mut old_salt) = self.encryption_salt.take() {
+            old_salt.zeroize();
+        }
+
+        self.encryption_key = Some(new_key);
+        self.encryption_salt = Some(salt);
+        Ok(())
     }
 }
 
@@ -608,5 +686,36 @@ mod tests {
         let storage2 = Storage::with_path(state_file.to_str().unwrap()).unwrap();
         let retrieved = storage2.get_session("persistence-test").unwrap().unwrap();
         assert_eq!(retrieved.id, "persistence-test");
+    }
+
+    #[test]
+    fn test_change_passphrase() {
+        let tmp_dir = TempDir::new().unwrap();
+        let state_file = tmp_dir.path().join("state.json");
+
+        // Create encrypted storage with default argon2 params
+        let mut storage = Storage::with_encryption(state_file.to_str().unwrap(), "oldpass").unwrap();
+        let session = Session {
+            id: "cp-session".to_string(),
+            name: "ChangePass Session".to_string(),
+            created_at: Utc::now(),
+            ended_at: None,
+            parent_session_id: None,
+            branch_name: None,
+        };
+        storage.store_session(&session).unwrap();
+        storage.flush().unwrap();
+
+        // Change passphrase
+        storage.change_passphrase("newpass").unwrap();
+
+        // Reopen with new passphrase
+        let storage2 = Storage::with_encryption(state_file.to_str().unwrap(), "newpass").unwrap();
+        let retrieved = storage2.get_session("cp-session").unwrap().unwrap();
+        assert_eq!(retrieved.id, "cp-session");
+
+        // Opening with old passphrase should fail (return Err)
+        let err = Storage::with_encryption(state_file.to_str().unwrap(), "oldpass");
+        assert!(err.is_err());
     }
 }
