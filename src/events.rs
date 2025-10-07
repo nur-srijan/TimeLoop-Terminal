@@ -87,14 +87,27 @@ impl EventRecorder {
             .get_last_event(session_id)?
             .map(|e| e.sequence_number)
             .unwrap_or(0);
+        // Enable redaction by default with sensible patterns
+        let default_patterns = vec![
+            r"(?i)(password|pwd|secret|token|api_key)\s*[:=]\s*[^\s\n]+".to_string(),
+            r"(?i)bearer\s+[A-Za-z0-9\-\._]+".to_string(),
+        ];
+        let compiled = default_patterns.into_iter().filter_map(|p| Regex::new(&p).ok()).collect();
+
         Ok(Self {
             session_id: session_id.to_string(),
             storage,
             sequence_counter: last_seq,
             current_command: None,
-            redact_output: false,
-            redact_patterns: Vec::new(),
+            redact_output: true,
+            redact_patterns: compiled,
         })
+    }
+
+    /// Disable redaction for this recorder. Useful for tests or when raw outputs are required.
+    pub fn disable_redaction(&mut self) {
+        self.redact_output = false;
+        self.redact_patterns.clear();
     }
 
     /// Create an EventRecorder with redaction enabled. Patterns are optional; if

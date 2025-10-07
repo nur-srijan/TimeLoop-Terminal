@@ -11,12 +11,11 @@ use crate::session::Session;
 use crate::branch::TimelineBranch;
 use base64;
 use chacha20poly1305;
-use pbkdf2;
-use hmac;
-use sha2;
-use rand::Rng;
+use argon2::Argon2;
+use zeroize::Zeroize;
 use base64::engine::general_purpose;
 use base64::Engine as _;
+use rand::RngCore;
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct StorageInner {
@@ -110,7 +109,8 @@ impl Storage {
         // If file didn't exist or wasn't encrypted, generate a salt now
         if encryption_salt.is_none() {
             let mut salt = vec![0u8; 16];
-            rand::thread_rng().fill(&mut salt[..]);
+            let mut osrng = rand::rngs::OsRng;
+            osrng.fill_bytes(&mut salt);
             let key = Self::derive_key(passphrase, &salt);
             encryption_key = Some(key);
             encryption_salt = Some(salt);
@@ -304,7 +304,8 @@ impl Storage {
         let parent = path.parent().ok_or_else(|| crate::error::TimeLoopError::FileSystem("Invalid path".to_string()))?;
         let mut tmp = parent.join(".tmp_timeloop");
         // add a random suffix to avoid collisions
-        let suffix: u64 = rand::thread_rng().gen();
+        let mut osrng = rand::rngs::OsRng;
+        let suffix: u64 = osrng.next_u64();
         tmp = tmp.with_extension(format!("{}.tmp", suffix));
  
          // Write tmp file
@@ -411,12 +412,13 @@ impl Storage {
 
     // Encrypt given plaintext with the given 32-byte key using XChaCha20-Poly1305.
     fn encrypt_bytes(key: &[u8; 32], plaintext: &[u8]) -> crate::Result<(Vec<u8>, Vec<u8>)> {
-        use chacha20poly1305::aead::{Aead, KeyInit, OsRng};
+        use chacha20poly1305::aead::{Aead, KeyInit};
         use chacha20poly1305::XChaCha20Poly1305;
         use chacha20poly1305::XNonce;
         let cipher = XChaCha20Poly1305::new(key.into());
         let mut nonce = vec![0u8; 24];
-        rand::thread_rng().fill(&mut nonce[..]);
+        let mut osrng = rand::rngs::OsRng;
+        osrng.fill_bytes(&mut nonce[..]);
         let nonce_arr = XNonce::from_slice(&nonce);
         let ciphertext = cipher.encrypt(nonce_arr, plaintext).map_err(|e| crate::error::TimeLoopError::FileSystem(format!("Encryption failed: {}", e)))?;
         Ok((nonce, ciphertext))
@@ -433,13 +435,12 @@ impl Storage {
 
     // Derive a 32-byte key from passphrase + salt using PBKDF2-HMAC-SHA256
     fn derive_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
-        use pbkdf2::pbkdf2;
-        use hmac::Hmac;
-        use sha2::Sha256;
-
-        let iterations: u32 = 100_000;
         let mut key = [0u8; 32];
-        pbkdf2::<Hmac<Sha256>>(passphrase.as_bytes(), salt, iterations, &mut key);
+        // Use Argon2id via the argon2 crate with default parameters; it's stronger
+        // than PBKDF2 for password-based key derivation and provides memory-hardness.
+        let argon = Argon2::default();
+        // hash_password_into returns Result<(), _>
+        argon.hash_password_into(passphrase.as_bytes(), salt, &mut key).expect("Argon2 key derivation failed");
         key
     }
 }
