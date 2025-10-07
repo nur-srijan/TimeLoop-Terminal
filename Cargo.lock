@@ -3296,6 +3296,7 @@ dependencies = [
  "eframe",
  "notify",
  "once_cell",
+ "rand",
  "ratatui",
  "reqwest",
  "serde",

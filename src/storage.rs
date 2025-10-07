@@ -288,7 +288,39 @@ impl Storage {
         }
 
         let data = serde_json::to_string_pretty(&data_inner)?;
-        fs::write(path, data).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        // Perform an atomic write: write to a temp file and rename into place. This
+        // reduces the chance of file corruption if the process is interrupted while
+        // writing. Note: on some platforms rename over an existing file may not be
+        // atomic across filesystems; avoid sharing the same file across mounts.
+        Self::atomic_write(path, data.as_bytes())?;
+        Ok(())
+    }
+
+    /// Public API: explicitly flush the storage state to disk. If this Storage
+    /// instance has an associated persistence path it will be saved there; otherwise
+    /// the global storage will be saved to the default location.
+    pub fn flush(&self) -> crate::Result<()> {
+        if let Some(path) = &self.persistence_path {
+            Self::save_to_path(path, self)
+        } else {
+            Self::save_to_disk()
+        }
+    }
+
+    // Helper to atomically write bytes to a file path. Writes to a temporary file in
+    // the same directory and then renames into place.
+    fn atomic_write(path: &PathBuf, bytes: &[u8]) -> crate::Result<()> {
+        let parent = path.parent().ok_or_else(|| crate::error::TimeLoopError::FileSystem("Invalid path".to_string()))?;
+        let mut tmp = parent.join(".tmp_timeloop");
+        // add a random suffix to avoid collisions
+        use rand::{thread_rng, Rng};
+        let suffix: u64 = thread_rng().gen();
+        tmp = tmp.with_extension(format!("{}.tmp", suffix));
+
+        // Write tmp file
+        fs::write(&tmp, bytes).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        // Rename into place (atomic on most platforms when on same filesystem)
+        std::fs::rename(&tmp, path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         Ok(())
     }
 
@@ -308,10 +340,13 @@ mod tests {
     use super::*;
     use crate::EventType;
     use uuid::Uuid;
+    use tempfile::TempDir;
 
     #[test]
     fn test_in_memory_storage() {
-        let storage = Storage::with_path("test-in-memory").unwrap();
+        let tmp_dir = TempDir::new().unwrap();
+        let state_file = tmp_dir.path().join("state.json");
+        let storage = Storage::with_path(state_file.to_str().unwrap()).unwrap();
         
         // Test session storage
         let session = Session {
@@ -342,5 +377,126 @@ mod tests {
         storage.store_event(&event).unwrap();
         let events = storage.get_events_for_session("test-session").unwrap();
         assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn test_persistence_roundtrip() {
+        let tmp_dir = TempDir::new().unwrap();
+        let state_file = tmp_dir.path().join("state.json");
+        let storage = Storage::with_path(state_file.to_str().unwrap()).unwrap();
+
+        // Initial state: empty
+        assert!(storage.list_sessions().unwrap().is_empty());
+        assert!(storage.list_branches().unwrap().is_empty());
+
+        // Create session and branch
+        let session = Session {
+            id: "roundtrip-session".to_string(),
+            name: "Roundtrip Session".to_string(),
+            created_at: Utc::now(),
+            ended_at: None,
+            parent_session_id: None,
+            branch_name: None,
+        };
+        storage.store_session(&session).unwrap();
+
+        let branch = TimelineBranch {
+            id: "roundtrip-branch".to_string(),
+            name: "Roundtrip Branch".to_string(),
+            parent_session_id: "roundtrip-session".to_string(),
+            branch_point_event_id: "".to_string(),
+            created_at: Utc::now(),
+            description: None,
+        };
+        storage.store_branch(&branch).unwrap();
+
+        // Verify stored state
+        let sessions = storage.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "roundtrip-session");
+
+        let branches = storage.list_branches().unwrap();
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].id, "roundtrip-branch");
+
+        // Write some events
+        let event1 = Event {
+            id: Uuid::new_v4().to_string(),
+            session_id: "roundtrip-session".to_string(),
+            event_type: EventType::KeyPress {
+                key: "a".to_string(),
+                timestamp: Utc::now(),
+            },
+            sequence_number: 1,
+            timestamp: Utc::now(),
+        };
+        storage.store_event(&event1).unwrap();
+
+        let event2 = Event {
+            id: Uuid::new_v4().to_string(),
+            session_id: "roundtrip-session".to_string(),
+            event_type: EventType::KeyPress {
+                key: "b".to_string(),
+                timestamp: Utc::now(),
+            },
+            sequence_number: 2,
+            timestamp: Utc::now(),
+        };
+        storage.store_event(&event2).unwrap();
+
+        // Flush to persist
+        storage.flush().unwrap();
+
+        // Drop storage to close file handles
+        drop(storage);
+
+        // Reopen storage
+        let storage = Storage::with_path("test-persistence-roundtrip").unwrap();
+
+        // Verify restored state
+        let sessions = storage.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "roundtrip-session");
+
+        let branches = storage.list_branches().unwrap();
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].id, "roundtrip-branch");
+
+        // Verify events
+        let events = storage.get_events_for_session("roundtrip-session").unwrap();
+        assert_eq!(events.len(), 2);
+        // Compare key values to avoid asserting on timestamps directly
+        if let EventType::KeyPress { key, .. } = &events[0].event_type {
+            assert_eq!(key, "a");
+        } else { panic!("expected key press event"); }
+        if let EventType::KeyPress { key, .. } = &events[1].event_type {
+            assert_eq!(key, "b");
+        } else { panic!("expected key press event"); }
+    }
+
+    #[test]
+    fn test_persistence_roundtrip_tempdir() {
+        let tmp_dir = TempDir::new().unwrap();
+        let state_file = tmp_dir.path().join("state.json");
+
+        // Create first storage instance backed by the file
+        let storage1 = Storage::with_path(state_file.to_str().unwrap()).unwrap();
+
+        let session = Session {
+            id: "persistence-test".to_string(),
+            name: "Persistence Test".to_string(),
+            created_at: Utc::now(),
+            ended_at: None,
+            parent_session_id: None,
+            branch_name: None,
+        };
+        storage1.store_session(&session).unwrap();
+        storage1.flush().unwrap();
+
+        // Create a second storage instance pointing at the same file and verify
+        // data persisted.
+        let storage2 = Storage::with_path(state_file.to_str().unwrap()).unwrap();
+        let retrieved = storage2.get_session("persistence-test").unwrap().unwrap();
+        assert_eq!(retrieved.id, "persistence-test");
     }
 }

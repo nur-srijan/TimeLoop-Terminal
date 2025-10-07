@@ -8,7 +8,7 @@ use timeloop_terminal::{
     storage::Storage,
 };
 use tracing::info;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 
 #[derive(Parser)]
 #[command(name = "timeloop")]
