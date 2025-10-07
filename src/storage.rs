@@ -9,6 +9,14 @@ use serde::{Deserialize, Serialize};
 use crate::Event;
 use crate::session::Session;
 use crate::branch::TimelineBranch;
+use base64;
+use chacha20poly1305;
+use pbkdf2;
+use hmac;
+use sha2;
+use rand::Rng;
+use base64::engine::general_purpose;
+use base64::Engine as _;
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct StorageInner {
@@ -25,13 +33,16 @@ pub struct Storage {
     // may optionally persist to the specified `persistence_path`.
     inner: Option<Arc<RwLock<StorageInner>>>,
     persistence_path: Option<PathBuf>,
+    // Encryption support
+    encryption_key: Option<[u8; 32]>,
+    encryption_salt: Option<Vec<u8>>,
 }
 
 impl Storage {
     pub fn new() -> crate::Result<Self> {
         // Best-effort load persisted state for the global storage
         let _ = Self::load_from_disk();
-        Ok(Self { inner: None, persistence_path: None })
+        Ok(Self { inner: None, persistence_path: None, encryption_key: None, encryption_salt: None })
     }
 
     // `with_path` creates an isolated storage instance whose state is stored in the
@@ -41,7 +52,7 @@ impl Storage {
     pub fn with_path(path: &str) -> crate::Result<Self> {
         let pb = PathBuf::from(path);
         let inner = Arc::new(RwLock::new(StorageInner::default()));
-        let storage = Self { inner: Some(inner.clone()), persistence_path: Some(pb.clone()) };
+        let storage = Self { inner: Some(inner.clone()), persistence_path: Some(pb.clone()), encryption_key: None, encryption_salt: None };
 
         // If the file exists, load it into the per-instance inner store
         if pb.exists() {
@@ -55,6 +66,57 @@ impl Storage {
         }
 
         Ok(storage)
+    }
+
+    /// Create or open a per-instance encrypted storage at `path` using `passphrase`.
+    /// If the file exists it will be decrypted with the derived key. If not, a new
+    /// salt is generated and used for subsequent writes.
+    pub fn with_encryption(path: &str, passphrase: &str) -> crate::Result<Self> {
+        let pb = PathBuf::from(path);
+        let inner = Arc::new(RwLock::new(StorageInner::default()));
+
+        // If file exists and appears encrypted, read salt from file wrapper
+        let mut encryption_key: Option<[u8; 32]> = None;
+        let mut encryption_salt: Option<Vec<u8>> = None;
+        if pb.exists() {
+            // Try to load wrapper
+            if let Ok(wrapper_str) = std::fs::read_to_string(&pb) {
+                if let Ok(wrapper) = serde_json::from_str::<EncryptedFile>(&wrapper_str) {
+                    if let Ok(salt_bytes) = general_purpose::STANDARD.decode(&wrapper.salt) {
+                        // derive key using passphrase and salt
+                        let key = Self::derive_key(passphrase, &salt_bytes);
+                        // attempt decryption to ensure key is correct
+                        if let Ok(ciphertext) = general_purpose::STANDARD.decode(&wrapper.ciphertext) {
+                            if let Ok(nonce_bytes) = general_purpose::STANDARD.decode(&wrapper.nonce) {
+                                if let Ok(plain) = Self::try_decrypt(&key, &nonce_bytes, &ciphertext) {
+                                    // load inner
+                                    if let Ok(inner_data) = serde_json::from_slice::<StorageInner>(&plain) {
+                                        if let Ok(mut guard) = inner.write() {
+                                            *guard = inner_data;
+                                        }
+                                        encryption_key = Some(key);
+                                        encryption_salt = Some(salt_bytes);
+                                    }
+                                } else {
+                                    return Err(crate::error::TimeLoopError::Configuration("Unable to decrypt storage: invalid passphrase".to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // If file didn't exist or wasn't encrypted, generate a salt now
+        if encryption_salt.is_none() {
+            let mut salt = vec![0u8; 16];
+            rand::thread_rng().fill(&mut salt[..]);
+            let key = Self::derive_key(passphrase, &salt);
+            encryption_key = Some(key);
+            encryption_salt = Some(salt);
+        }
+
+        Ok(Self { inner: Some(inner), persistence_path: Some(pb), encryption_key, encryption_salt })
     }
 
     pub fn get_db_path() -> crate::Result<std::path::PathBuf> {
@@ -227,12 +289,54 @@ impl Storage {
         }
         Ok(id)
     }
+
+    pub fn flush(&self) -> crate::Result<()> {
+        if let Some(path) = &self.persistence_path {
+            Self::save_to_path(path, self)
+        } else {
+            Self::save_to_disk()
+        }
+    }
+
+    // Helper to atomically write bytes to a file path. Writes to a temporary file in
+    // the same directory and then renames into place.
+    fn atomic_write(path: &PathBuf, bytes: &[u8]) -> crate::Result<()> {
+        let parent = path.parent().ok_or_else(|| crate::error::TimeLoopError::FileSystem("Invalid path".to_string()))?;
+        let mut tmp = parent.join(".tmp_timeloop");
+        // add a random suffix to avoid collisions
+        let suffix: u64 = rand::thread_rng().gen();
+        tmp = tmp.with_extension(format!("{}.tmp", suffix));
+ 
+         // Write tmp file
+         fs::write(&tmp, bytes).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+         // Rename into place (atomic on most platforms when on same filesystem)
+         std::fs::rename(&tmp, path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+         Ok(())
+     }
+
+    fn save_to_disk() -> crate::Result<()> {
+        let dir = Self::data_dir();
+        fs::create_dir_all(&dir).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        let path = Self::persistence_file();
+        let guard = GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+        let data = serde_json::to_string_pretty(&*guard)?;
+        // atomic write
+        Self::atomic_write(&path, data.as_bytes())?;
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize)]
 struct SessionExport {
     session: Session,
     events: Vec<Event>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EncryptedFile {
+    salt: String,
+    nonce: String,
+    ciphertext: String,
 }
 
 impl Storage {
@@ -282,56 +386,61 @@ impl Storage {
             GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?.clone()
         };
 
-        // Ensure parent dir exists
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-        }
-
         let data = serde_json::to_string_pretty(&data_inner)?;
-        // Perform an atomic write: write to a temp file and rename into place. This
-        // reduces the chance of file corruption if the process is interrupted while
-        // writing. Note: on some platforms rename over an existing file may not be
-        // atomic across filesystems; avoid sharing the same file across mounts.
-        Self::atomic_write(path, data.as_bytes())?;
-        Ok(())
-    }
-
-    /// Public API: explicitly flush the storage state to disk. If this Storage
-    /// instance has an associated persistence path it will be saved there; otherwise
-    /// the global storage will be saved to the default location.
-    pub fn flush(&self) -> crate::Result<()> {
-        if let Some(path) = &self.persistence_path {
-            Self::save_to_path(path, self)
+        // If encryption is enabled on this storage, encrypt the blob and write a wrapper
+        if let Some(key) = &storage.encryption_key {
+            // reuse salt if present
+            let salt = storage.encryption_salt.as_ref().ok_or_else(|| crate::error::TimeLoopError::Configuration("Missing salt for encrypted storage".to_string()))?;
+            let (nonce, ciphertext) = Self::encrypt_bytes(key, data.as_bytes())?;
+            let wrapper = EncryptedFile {
+                salt: general_purpose::STANDARD.encode(salt),
+                nonce: general_purpose::STANDARD.encode(&nonce),
+                ciphertext: general_purpose::STANDARD.encode(&ciphertext),
+            };
+            let wrapper_json = serde_json::to_string_pretty(&wrapper)?;
+            Self::atomic_write(path, wrapper_json.as_bytes())?;
         } else {
-            Self::save_to_disk()
+            // Perform an atomic write: write to a temp file and rename into place. This
+            // reduces the chance of file corruption if the process is interrupted while
+            // writing. Note: on some platforms rename over an existing file may not be
+            // atomic across filesystems; avoid sharing the same file across mounts.
+            Self::atomic_write(path, data.as_bytes())?;
         }
-    }
-
-    // Helper to atomically write bytes to a file path. Writes to a temporary file in
-    // the same directory and then renames into place.
-    fn atomic_write(path: &PathBuf, bytes: &[u8]) -> crate::Result<()> {
-        let parent = path.parent().ok_or_else(|| crate::error::TimeLoopError::FileSystem("Invalid path".to_string()))?;
-        let mut tmp = parent.join(".tmp_timeloop");
-        // add a random suffix to avoid collisions
-        use rand::{thread_rng, Rng};
-        let suffix: u64 = thread_rng().gen();
-        tmp = tmp.with_extension(format!("{}.tmp", suffix));
-
-        // Write tmp file
-        fs::write(&tmp, bytes).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-        // Rename into place (atomic on most platforms when on same filesystem)
-        std::fs::rename(&tmp, path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         Ok(())
     }
 
-    fn save_to_disk() -> crate::Result<()> {
-        let dir = Self::data_dir();
-        fs::create_dir_all(&dir).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-        let path = Self::persistence_file();
-        let guard = GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-        let data = serde_json::to_string_pretty(&*guard)?;
-        fs::write(&path, data).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-        Ok(())
+    // Encrypt given plaintext with the given 32-byte key using XChaCha20-Poly1305.
+    fn encrypt_bytes(key: &[u8; 32], plaintext: &[u8]) -> crate::Result<(Vec<u8>, Vec<u8>)> {
+        use chacha20poly1305::aead::{Aead, KeyInit, OsRng};
+        use chacha20poly1305::XChaCha20Poly1305;
+        use chacha20poly1305::XNonce;
+        let cipher = XChaCha20Poly1305::new(key.into());
+        let mut nonce = vec![0u8; 24];
+        rand::thread_rng().fill(&mut nonce[..]);
+        let nonce_arr = XNonce::from_slice(&nonce);
+        let ciphertext = cipher.encrypt(nonce_arr, plaintext).map_err(|e| crate::error::TimeLoopError::FileSystem(format!("Encryption failed: {}", e)))?;
+        Ok((nonce, ciphertext))
+    }
+
+    fn try_decrypt(key: &[u8; 32], nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, ()> {
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::XChaCha20Poly1305;
+        use chacha20poly1305::XNonce;
+        let cipher = XChaCha20Poly1305::new(key.into());
+        let nonce_arr = XNonce::from_slice(nonce);
+        cipher.decrypt(nonce_arr, ciphertext).map_err(|_| ())
+    }
+
+    // Derive a 32-byte key from passphrase + salt using PBKDF2-HMAC-SHA256
+    fn derive_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
+        use pbkdf2::pbkdf2;
+        use hmac::Hmac;
+        use sha2::Sha256;
+
+        let iterations: u32 = 100_000;
+        let mut key = [0u8; 32];
+        pbkdf2::<Hmac<Sha256>>(passphrase.as_bytes(), salt, iterations, &mut key);
+        key
     }
 }
 

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use crate::storage::Storage;
+use regex::Regex;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum EventType {
@@ -73,7 +74,9 @@ pub struct EventRecorder {
     storage: Storage,
     sequence_counter: u64,
     current_command: Option<String>,
-    // Removed unused field: command_buffer
+    /// If true, command outputs will be redacted using the compiled patterns
+    redact_output: bool,
+    redact_patterns: Vec<Regex>,
 }
 
 impl EventRecorder {
@@ -89,14 +92,46 @@ impl EventRecorder {
             storage,
             sequence_counter: last_seq,
             current_command: None,
-
+            redact_output: false,
+            redact_patterns: Vec::new(),
         })
+    }
+
+    /// Create an EventRecorder with redaction enabled. Patterns are optional; if
+    /// none are provided a sensible default set is used.
+    pub fn with_storage_and_redaction(session_id: &str, storage: Storage, redact: bool, patterns: Option<Vec<String>>) -> Self {
+        let last_seq = storage
+            .get_last_event(session_id)
+            .ok()
+            .flatten()
+            .map(|e| e.sequence_number)
+            .unwrap_or(0);
+
+        let compiled = if redact {
+            let pats = patterns.unwrap_or_else(|| vec![
+                r"(?i)(password|pwd|secret|token|api_key)\s*[:=]\s*[^\s\n]+".to_string(),
+                r"(?i)bearer\s+[A-Za-z0-9\-\._]+".to_string(),
+            ]);
+            pats.into_iter().filter_map(|p| Regex::new(&p).ok()).collect()
+        } else { Vec::new() };
+
+        Self {
+            session_id: session_id.to_string(),
+            storage,
+            sequence_counter: last_seq,
+            current_command: None,
+            redact_output: redact,
+            redact_patterns: compiled,
+        }
     }
 
     // Remove new_with_unique_db since we're using in-memory storage
     pub fn new_with_unique_db(session_id: &str) -> crate::Result<Self> {
         // In-memory storage doesn't need unique paths
-        Self::new(session_id)
+        let mut s = Self::new(session_id)?;
+        s.redact_output = false;
+        s.redact_patterns = Vec::new();
+        Ok(s)
     }
 
     pub fn with_storage(session_id: &str, storage: Storage) -> Self {
@@ -111,6 +146,8 @@ impl EventRecorder {
             storage,
             sequence_counter: last_seq,
             current_command: None,
+            redact_output: false,
+            redact_patterns: Vec::new(),
 
         }
     }
@@ -132,11 +169,17 @@ impl EventRecorder {
 
     pub fn record_command(&mut self, command: &str, output: &str, exit_code: i32, working_dir: &str) -> crate::Result<()> {
         self.sequence_counter += 1;
+        let stored_output = if self.redact_output {
+            self.apply_redaction(output)
+        } else {
+            output.to_string()
+        };
+        
         let event = Event::new(
             &self.session_id,
             EventType::Command {
                 command: command.to_string(),
-                output: output.to_string(),
+                output: stored_output,
                 exit_code,
                 working_directory: working_dir.to_string(),
                 timestamp: Utc::now(),
@@ -206,5 +249,35 @@ impl EventRecorder {
     /// Get a reference to the storage
     pub fn storage(&self) -> &Storage {
         &self.storage
+    }
+
+    fn apply_redaction(&self, text: &str) -> String {
+        let mut s = text.to_string();
+        for re in &self.redact_patterns {
+            s = re.replace_all(&s, "[REDACTED]").to_string();
+        }
+        s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_redaction() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = tmp_dir.path().join("events_redaction.db");
+        let storage = crate::storage::Storage::with_path(db_path.to_str().unwrap()).unwrap();
+        let mut recorder = EventRecorder::with_storage_and_redaction("redact-session", storage, true, None);
+
+        recorder.record_command("echo secret", "password=supersecret token=abc123", 0, "/tmp").unwrap();
+        let events = recorder.get_events_for_session("redact-session").unwrap();
+        assert_eq!(events.len(), 1);
+        if let EventType::Command { output, .. } = &events[0].event_type {
+            assert!(output.contains("[REDACTED]"));
+            assert!(!output.contains("supersecret"));
+            assert!(!output.contains("abc123"));
+        } else { panic!("expected command event"); }
     }
 }

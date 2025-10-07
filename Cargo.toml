@@ -48,6 +48,14 @@ eframe = { version = "0.24", optional = true }
 
 rand = "0.8"
 
+# Crypto and redaction dependencies
+chacha20poly1305 = "0.10"
+pbkdf2 = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.21"
+regex = "1.11"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.10"
