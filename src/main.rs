@@ -34,6 +34,34 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     append_events: bool,
 
+    /// Argon2 memory in KiB (default: 65536)
+    #[arg(long)]
+    argon2_memory_kib: Option<u32>,
+
+    /// Argon2 iterations / time cost (default: 3)
+    #[arg(long)]
+    argon2_iterations: Option<u32>,
+
+    /// Argon2 parallelism (default: 1)
+    #[arg(long)]
+    argon2_parallelism: Option<u32>,
+
+    /// Max append log size in MB before rotation
+    #[arg(long)]
+    max_log_size_mb: Option<u64>,
+
+    /// Max events before rotation
+    #[arg(long)]
+    max_events: Option<usize>,
+
+    /// Retention count for rotated logs
+    #[arg(long)]
+    retention_count: Option<usize>,
+
+    /// Background compaction interval in seconds
+    #[arg(long)]
+    compaction_interval_secs: Option<u64>,
+
     /// Branch from a specific session ID
     #[arg(short, long)]
     branch: Option<String>,
@@ -153,6 +181,25 @@ async fn main() -> Result<(), TimeLoopError> {
         }
     }
     timeloop_terminal::storage::Storage::set_global_append_only(cli.append_events);
+
+    // Wire Argon2 CLI params into global config if provided
+    if cli.argon2_memory_kib.is_some() || cli.argon2_iterations.is_some() || cli.argon2_parallelism.is_some() {
+        let mut cfg = timeloop_terminal::storage::Argon2Config::default();
+        if let Some(m) = cli.argon2_memory_kib { cfg.memory_kib = m; }
+        if let Some(i) = cli.argon2_iterations { cfg.iterations = i; }
+        if let Some(p) = cli.argon2_parallelism { cfg.parallelism = p; }
+        timeloop_terminal::storage::Storage::set_global_argon2_config(cfg);
+    }
+
+    // Wire compaction/rotation CLI flags into global compaction policy
+    if cli.max_log_size_mb.is_some() || cli.max_events.is_some() || cli.retention_count.is_some() || cli.compaction_interval_secs.is_some() {
+        let mut pol = timeloop_terminal::storage::CompactionPolicy::default();
+        if let Some(mb) = cli.max_log_size_mb { pol.max_log_size_bytes = Some(mb * 1024 * 1024); }
+        if let Some(me) = cli.max_events { pol.max_events = Some(me); }
+        if let Some(rc) = cli.retention_count { pol.retention_count = rc; }
+        if let Some(ci) = cli.compaction_interval_secs { pol.compaction_interval_secs = Some(ci); }
+        timeloop_terminal::storage::Storage::set_global_compaction_policy(pol);
+    }
 
     match &cli.command {
         Some(Commands::Start { name }) => {

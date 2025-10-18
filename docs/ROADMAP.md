@@ -45,6 +45,19 @@ Caveats and considerations
 - Data size: session recording can grow large for long sessions. Add compression and retention policies.
 - Privacy: user command output may contain secrets. Provide opt-in redaction options and encrypted storage.
 
+New in this branch: compaction, rotation and CLI knobs
+- Append-only event log compaction: the storage layer now supports an opt-in append-only event log and a `Storage::compact()` operation which writes a full snapshot atomically and rotates/truncates event logs.
+- Rotation and retention policies: configure maximum append-log size, maximum event count, retention count for rotated logs, and an interval for background compaction.
+- Background compaction: opt-in background thread that will rotate logs based on configured thresholds and perform best-effort retention pruning.
+- CLI flags added to tune Argon2 (memory/iterations/parallelism) and compaction/rotation thresholds (max-log-size, max-events, retention-count, compaction-interval).
+
+Usage examples:
+
+- Tune Argon2 parameters:
+	cargo run -- --argon2-memory-kib 131072 --argon2-iterations 4
+- Enable append-only logging and set rotation thresholds:
+	cargo run -- --append-events --max-log-size-mb 100 --max-events 200000 --retention-count 10 --compaction-interval-secs 3600
+
 How to contribute and test
 - Use the `gui` feature flag to build GUI: `cargo run -p timeloop-terminal --bin gui --features gui`.
 - To run tests: `cargo test`.

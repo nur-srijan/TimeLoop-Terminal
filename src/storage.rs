@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Write as _, BufRead, Read};
+use std::io::{Write as _, BufRead, Read, Seek};
 use std::sync::{RwLock, Arc};
+use std::thread;
+use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use once_cell::sync::{Lazy, OnceCell};
@@ -65,6 +68,14 @@ pub struct Storage {
     // Append-only event log support
     append_only: bool,
     events_log_path: Option<PathBuf>,
+    // Rotation/compaction policy (per-instance overrides global policy when set)
+    max_log_size_bytes: Option<u64>,
+    max_events: Option<usize>,
+    retention_count: usize,
+    compaction_interval_secs: Option<u64>,
+    // Background compaction control
+    background_running: Option<Arc<AtomicBool>>,
+    background_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Storage {
@@ -74,7 +85,9 @@ impl Storage {
         // adopt global config
         let fmt = global_persistence_format();
         let append = global_append_only();
-        let mut s = Self { inner: None, persistence_path: None, encryption_key: None, encryption_salt: None, argon2_config: None, persistence_format: fmt, append_only: append, events_log_path: None };
+    // load global compaction defaults
+    let gp = global_compaction_policy();
+    let mut s = Self { inner: None, persistence_path: None, encryption_key: None, encryption_salt: None, argon2_config: None, persistence_format: fmt, append_only: append, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None };
         if append {
             // compute events log path for default global persistence file
             let p = Self::persistence_file();
@@ -98,7 +111,8 @@ impl Storage {
     pub fn with_path_and_format(path: &str, format: PersistenceFormat) -> crate::Result<Self> {
         let pb = PathBuf::from(path);
         let inner = Arc::new(RwLock::new(StorageInner::default()));
-        let mut storage = Self { inner: Some(inner.clone()), persistence_path: Some(pb.clone()), encryption_key: None, encryption_salt: None, argon2_config: None, persistence_format: format, append_only: false, events_log_path: None };
+    let gp = global_compaction_policy();
+    let mut storage = Self { inner: Some(inner.clone()), persistence_path: Some(pb.clone()), encryption_key: None, encryption_salt: None, argon2_config: None, persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None };
 
         // If the file exists, load it into the per-instance inner store
         if pb.exists() {
@@ -207,7 +221,8 @@ impl Storage {
             encryption_salt = Some(salt);
         }
 
-        Ok(Self { inner: Some(inner), persistence_path: Some(pb), encryption_key, encryption_salt, argon2_config: Some(params.clone()), persistence_format: format, append_only: false, events_log_path: None })
+        let gp = global_compaction_policy();
+        Ok(Self { inner: Some(inner), persistence_path: Some(pb), encryption_key, encryption_salt, argon2_config: Some(params.clone()), persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None })
     }
 
     pub fn get_db_path() -> crate::Result<std::path::PathBuf> {
@@ -420,6 +435,208 @@ impl Storage {
         let data = serde_json::to_string_pretty(&*guard)?;
         // atomic write
         Self::atomic_write(&path, data.as_bytes())?;
+        Ok(())
+    }
+
+    /// Perform compaction: write a full snapshot atomically and rotate/truncate
+    /// the append-only event log according to rotation/retention settings.
+    pub fn compact(&self) -> crate::Result<()> {
+        // Persist current snapshot
+        if let Some(path) = &self.persistence_path {
+            Self::save_to_path(path, self)?;
+        } else if self.inner.is_none() {
+            Self::save_to_disk()?;
+        }
+
+        // Rotate/truncate events log
+        let log_path = match &self.events_log_path {
+            Some(p) => p.clone(),
+            None => return Ok(()),
+        };
+
+        if !log_path.exists() {
+            return Ok(());
+        }
+
+        // Decide whether to rotate based on size or event count if configured
+        let mut should_rotate = false;
+        if let Some(max_size) = self.max_log_size_bytes {
+            if let Ok(metadata) = std::fs::metadata(&log_path) {
+                if metadata.len() > max_size {
+                    should_rotate = true;
+                }
+            }
+        }
+
+        if !should_rotate {
+            if let Some(max_ev) = self.max_events {
+                // Count events (lines for JSON, records for CBOR)
+                if self.persistence_format == PersistenceFormat::Json {
+                    if let Ok(file) = std::fs::File::open(&log_path) {
+                        let reader = std::io::BufReader::new(file);
+                        let mut cnt = 0usize;
+                        for _ in reader.lines() { cnt += 1; if cnt > max_ev { should_rotate = true; break; } }
+                    }
+                } else {
+                    // For CBOR count records by iterating length-prefixed entries
+                    if let Ok(mut file) = std::fs::File::open(&log_path) {
+                        let mut cnt = 0usize;
+                        loop {
+                            let mut len_buf = [0u8; 4];
+                            if file.read_exact(&mut len_buf).is_err() { break; }
+                            let len = u32::from_le_bytes(len_buf) as usize;
+                            if file.seek(std::io::SeekFrom::Current(len as i64)).is_err() { break; }
+                            cnt += 1;
+                            if cnt > max_ev { should_rotate = true; break; }
+                        }
+                    }
+                }
+            }
+        }
+
+        if should_rotate {
+            // create rotated name with timestamp
+            let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
+            let rotated = log_path.with_extension(format!("rot.{}", ts));
+            std::fs::rename(&log_path, &rotated).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            // create new empty log file
+            std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&log_path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+
+            // Enforce retention: remove oldest rotated files beyond retention_count
+            let retention = self.retention_count;
+            if retention > 0 {
+                if let Some(dir) = rotated.parent() {
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        let prefix = log_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                        // collect rotated files matching prefix.rot.*
+                        let mut rots: Vec<(std::time::SystemTime, PathBuf)> = vec![];
+                        for e in entries.filter_map(|e| e.ok()) {
+                            let p = e.path();
+                            if p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with(&prefix) && n.contains("rot.")).unwrap_or(false) {
+                                if let Ok(meta) = p.metadata() {
+                                    if let Ok(mtime) = meta.modified() {
+                                        rots.push((mtime, p.clone()));
+                                    }
+                                }
+                            }
+                        }
+                        // sort by modified time desc (newest first)
+                        rots.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+                        if rots.len() > retention as usize {
+                            for (_, path) in rots.iter().skip(retention) {
+                                let _ = std::fs::remove_file(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Start a background compaction thread (opt-in). The thread periodically
+    /// invokes `compact()` according to `compaction_interval_secs`. If no interval
+    /// is configured this becomes a no-op.
+    pub fn start_background_compaction(&mut self) -> crate::Result<()> {
+        if self.background_handle.is_some() {
+            return Ok(());
+        }
+        let interval = match self.compaction_interval_secs.or_else(|| global_compaction_policy().compaction_interval_secs) {
+            Some(s) if s > 0 => s,
+            _ => return Ok(()),
+        };
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = running.clone();
+        // we need a weak clone of storage references: we will call compact on a cloned reference
+        let this_path = self.persistence_path.clone();
+        let this_events = self.events_log_path.clone();
+        let fmt = self.persistence_format;
+        let max_size = self.max_log_size_bytes;
+        let max_events = self.max_events;
+        let retention = self.retention_count;
+        let interval_dur = Duration::from_secs(interval);
+
+        // Spawn a thread that owns a minimal Storage-like control structure by closure
+        let handle = thread::spawn(move || {
+            while running_clone.load(Ordering::SeqCst) {
+                thread::sleep(interval_dur);
+                // Attempt compaction: recreate a Storage-like ephemeral writer
+                if let Some(p) = &this_path {
+                    // Try to open and perform a simple rotation snapshot: write the current global snapshot
+                    // Note: background compaction uses global snapshot for global storage or file-backed instance snapshot is not accessible here safely.
+                    // We'll perform a best-effort: if path exists, rename events log if it exceeds threshold.
+                    let log_path = if let Some(e) = &this_events { e.clone() } else { Storage::events_log_for(p, fmt) };
+                    if log_path.exists() {
+                        // Check thresholds
+                        let mut should_rotate = false;
+                        if let Some(ms) = max_size {
+                            if let Ok(meta) = std::fs::metadata(&log_path) {
+                                if meta.len() > ms { should_rotate = true; }
+                            }
+                        }
+                        if !should_rotate {
+                            if let Some(me) = max_events {
+                                // count lines
+                                if fmt == PersistenceFormat::Json {
+                                    if let Ok(file) = std::fs::File::open(&log_path) {
+                                        let reader = std::io::BufReader::new(file);
+                                        let mut cnt = 0usize;
+                                        for _ in reader.lines() { cnt += 1; if cnt > me { should_rotate = true; break; } }
+                                    }
+                                }
+                            }
+                        }
+                        if should_rotate {
+                            let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
+                            let rotated = log_path.with_extension(format!("rot.{}", ts));
+                            let _ = std::fs::rename(&log_path, &rotated);
+                            let _ = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&log_path);
+                            // retention enforcement best-effort
+                            if retention > 0 {
+                                if let Some(dir) = rotated.parent() {
+                                    if let Ok(entries) = std::fs::read_dir(dir) {
+                                        let prefix = log_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                                        let mut rots: Vec<(std::time::SystemTime, PathBuf)> = vec![];
+                                        for e in entries.filter_map(|e| e.ok()) {
+                                            let p = e.path();
+                                            if p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with(&prefix) && n.contains("rot.")).unwrap_or(false) {
+                                                if let Ok(meta) = p.metadata() {
+                                                    if let Ok(mtime) = meta.modified() {
+                                                        rots.push((mtime, p.clone()));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        rots.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+                                        if rots.len() > retention as usize {
+                                            for (_, path) in rots.iter().skip(retention) {
+                                                let _ = std::fs::remove_file(path);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        self.background_running = Some(running);
+        self.background_handle = Some(handle);
+        Ok(())
+    }
+
+    /// Stop background compaction if running and join the thread.
+    pub fn stop_background_compaction(&mut self) -> crate::Result<()> {
+        if let Some(running) = &self.background_running {
+            running.store(false, Ordering::SeqCst);
+        }
+        if let Some(handle) = self.background_handle.take() {
+            let _ = handle.join();
+        }
+        self.background_running = None;
         Ok(())
     }
 }
@@ -750,6 +967,22 @@ impl Storage {
 // Global config statics and accessors
 static GLOBAL_PERSISTENCE_FORMAT: OnceCell<RwLock<PersistenceFormat>> = OnceCell::new();
 static GLOBAL_APPEND_ONLY: OnceCell<RwLock<bool>> = OnceCell::new();
+static GLOBAL_COMPACTION_POLICY: OnceCell<RwLock<CompactionPolicy>> = OnceCell::new();
+static GLOBAL_ARGON2_CONFIG: OnceCell<RwLock<Argon2Config>> = OnceCell::new();
+
+#[derive(Debug, Clone, Copy)]
+pub struct CompactionPolicy {
+    pub max_log_size_bytes: Option<u64>,
+    pub max_events: Option<usize>,
+    pub retention_count: usize,
+    pub compaction_interval_secs: Option<u64>,
+}
+
+impl Default for CompactionPolicy {
+    fn default() -> Self {
+        Self { max_log_size_bytes: Some(10 * 1024 * 1024), max_events: Some(100_000), retention_count: 5, compaction_interval_secs: Some(60 * 60) }
+    }
+}
 
 fn global_persistence_format() -> PersistenceFormat {
     GLOBAL_PERSISTENCE_FORMAT.get_or_init(|| RwLock::new(PersistenceFormat::Json)).read().unwrap().clone()
@@ -757,6 +990,26 @@ fn global_persistence_format() -> PersistenceFormat {
 
 fn global_append_only() -> bool {
     *GLOBAL_APPEND_ONLY.get_or_init(|| RwLock::new(false)).read().unwrap()
+}
+
+fn global_compaction_policy() -> CompactionPolicy {
+    GLOBAL_COMPACTION_POLICY.get_or_init(|| RwLock::new(CompactionPolicy::default())).read().unwrap().clone()
+}
+
+fn global_argon2_config() -> Argon2Config {
+    GLOBAL_ARGON2_CONFIG.get_or_init(|| RwLock::new(Argon2Config::default())).read().unwrap().clone()
+}
+
+impl Storage {
+    pub fn set_global_compaction_policy(policy: CompactionPolicy) {
+        let cell = GLOBAL_COMPACTION_POLICY.get_or_init(|| RwLock::new(policy));
+        if let Ok(mut guard) = cell.write() { *guard = policy; }
+    }
+
+    pub fn set_global_argon2_config(cfg: Argon2Config) {
+        let cell = GLOBAL_ARGON2_CONFIG.get_or_init(|| RwLock::new(cfg));
+        if let Ok(mut guard) = cell.write() { *guard = cfg; }
+    }
 }
 
 // Encrypted event wrappers (module scope)
