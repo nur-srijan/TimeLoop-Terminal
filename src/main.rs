@@ -161,6 +161,12 @@ enum Commands {
         #[arg(long)]
         model: Option<String>,
     },
+    /// Compact storage
+    Compact {
+        /// Optional path to a storage file to compact (defaults to global storage)
+        #[arg(long)]
+        file: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -244,6 +250,18 @@ async fn main() -> Result<(), TimeLoopError> {
         }
         Some(Commands::Summarize { session_id, model }) => {
             run_ai_summarize(session_id, model.as_deref()).await?;
+        }
+        Some(Commands::Compact { file }) => {
+            // If a file was provided, compact that specific storage instance; otherwise compact global storage.
+            if let Some(f) = file {
+                let st = timeloop_terminal::storage::Storage::with_path(f.as_str())?;
+                st.compact()?;
+                println!("Compacted storage at {}", f);
+            } else {
+                let st = timeloop_terminal::storage::Storage::new()?;
+                st.compact()?;
+                println!("Compacted global storage");
+            }
         }
         None => {
             // Default behavior: start a new session

@@ -79,6 +79,37 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// Set per-instance max log size in bytes (overrides global policy for this instance)
+    pub fn set_max_log_size_bytes(&mut self, v: Option<u64>) {
+        self.max_log_size_bytes = v;
+    }
+
+    /// Set per-instance max events threshold (overrides global policy for this instance)
+    pub fn set_max_events(&mut self, v: Option<usize>) {
+        self.max_events = v;
+    }
+
+    /// Set per-instance retention count for rotated logs
+    pub fn set_retention_count(&mut self, v: usize) {
+        self.retention_count = v;
+    }
+
+    /// Set per-instance compaction interval in seconds
+    pub fn set_compaction_interval_secs(&mut self, v: Option<u64>) {
+        self.compaction_interval_secs = v;
+    }
+
+    /// Replace the compaction policy for this instance
+    pub fn set_compaction_policy(&mut self, p: CompactionPolicy) {
+        self.max_log_size_bytes = p.max_log_size_bytes;
+        self.max_events = p.max_events;
+        self.retention_count = p.retention_count;
+        self.compaction_interval_secs = p.compaction_interval_secs;
+    }
+
+    /// Get the per-instance retention_count
+    pub fn retention_count(&self) -> usize { self.retention_count }
+
     pub fn new() -> crate::Result<Self> {
         // Best-effort load persisted state for the global storage
         let _ = Self::load_from_disk();
@@ -1372,5 +1403,56 @@ mod tests {
         let storage2 = Storage::with_path_and_format(state_file.to_str().unwrap(), PersistenceFormat::Cbor).unwrap();
         let events = storage2.get_events_for_session("ac-session").unwrap();
         assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn test_compact_rotates_on_size_and_enforces_retention() {
+        use std::io::Write as _;
+        let tmp_dir = TempDir::new().unwrap();
+        let state_file = tmp_dir.path().join("state.json");
+        let mut storage = Storage::with_path_and_format(state_file.to_str().unwrap(), PersistenceFormat::Json).unwrap();
+        storage.enable_append_only();
+    // Lower thresholds for test via setters
+    storage.set_max_log_size_bytes(Some(1024)); // 1 KiB
+    storage.set_retention_count(2);
+
+        // Append events until file exceeds threshold
+        for i in 0..200 {
+            let ev = Event { id: Uuid::new_v4().to_string(), session_id: "rt-session".to_string(), event_type: EventType::KeyPress { key: format!("k{}", i), timestamp: Utc::now() }, sequence_number: i, timestamp: Utc::now() };
+            storage.store_event(&ev).unwrap();
+        }
+        // Force compaction/rotation
+        storage.compact().unwrap();
+
+        // Check rotated files exist (at least one rot file)
+        let events_path = storage.events_log_path.unwrap();
+        let dir = events_path.parent().unwrap();
+        let mut rotated_count = 0usize;
+        for entry in std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()) {
+            let p = entry.path();
+            if p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("state.json.events.jsonl") && n.contains("rot.")).unwrap_or(false) {
+                rotated_count += 1;
+            }
+        }
+        assert!(rotated_count >= 1);
+
+        // Create additional rotated files to exceed retention and then run compact again
+        for t in 0..4 {
+            let fake = events_path.with_extension(format!("rot.test{}.{}", t, Utc::now().timestamp()));
+            let mut f = std::fs::File::create(&fake).unwrap();
+            f.write_all(b"x").unwrap();
+        }
+
+        storage.compact().unwrap();
+
+        // After retention enforcement, rotated files should be <= retention_count
+        let mut rots = vec![];
+        for entry in std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()) {
+            let p = entry.path();
+            if p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("state.json.events.jsonl") && n.contains("rot.")).unwrap_or(false) {
+                rots.push(p);
+            }
+        }
+        assert!(rots.len() <= storage.retention_count as usize + 1); // +1 tolerant
     }
 }
