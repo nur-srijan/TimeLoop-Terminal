@@ -1038,7 +1038,7 @@ impl Storage {
     }
 
     pub fn set_global_argon2_config(cfg: Argon2Config) {
-        let cell = GLOBAL_ARGON2_CONFIG.get_or_init(|| RwLock::new(cfg));
+        let cell = GLOBAL_ARGON2_CONFIG.get_or_init(|| RwLock::new(cfg.clone()));
         if let Ok(mut guard) = cell.write() { *guard = cfg; }
     }
 }
