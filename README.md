@@ -2,6 +2,7 @@
 
 > **Your terminal is not just a tool. It's a time machine.**
 
+[![Rust-Clippy](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/rust-clippy.yml/badge.svg)](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/rust-clippy.yml)
 [![CodeQL](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/codeql.yml/badge.svg)](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/codeql.yml)
 [![CI](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/ci.yml/badge.svg)](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/ci.yml)
 [![Release](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/release.yml/badge.svg)](https://github.com/nur-srijan/TimeLoop-Terminal/actions/workflows/release.yml)
