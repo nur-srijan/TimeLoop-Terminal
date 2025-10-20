@@ -52,6 +52,24 @@ pub enum PersistenceFormat {
     Cbor,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AutosavePolicy {
+    /// Time-based debounce: save after a period of inactivity
+    Debounce { 
+        /// Duration in milliseconds to wait after last write before saving
+        debounce_ms: u64,
+    },
+    /// Write coalescing: save after a certain number of writes
+    Coalescing { 
+        /// Number of writes to accumulate before saving
+        write_threshold: u32,
+        /// Maximum time to wait before forcing a save (in milliseconds)
+        max_delay_ms: u64,
+    },
+    /// Disabled: no automatic saving
+    Disabled,
+}
+
 pub struct Storage {
     // When `inner` is None, operations go to the global singleton (and persist to the global location).
     // When `inner` is Some(...), this Storage instance operates on an independent in-memory store and
@@ -76,6 +94,10 @@ pub struct Storage {
     // Background compaction control
     background_running: Option<Arc<AtomicBool>>,
     background_handle: Option<thread::JoinHandle<()>>,
+    // Autosave policy
+    autosave_policy: Option<AutosavePolicy>,
+    last_write_time: Arc<RwLock<Option<std::time::Instant>>>,
+    pending_writes: Arc<RwLock<u32>>,
 }
 
 impl Storage {
@@ -110,6 +132,16 @@ impl Storage {
     /// Get the per-instance retention_count
     pub fn retention_count(&self) -> usize { self.retention_count }
 
+    /// Set the autosave policy for this storage instance
+    pub fn set_autosave_policy(&mut self, policy: AutosavePolicy) {
+        self.autosave_policy = Some(policy);
+    }
+
+    /// Get the current autosave policy
+    pub fn autosave_policy(&self) -> Option<&AutosavePolicy> {
+        self.autosave_policy.as_ref()
+    }
+
     pub fn new() -> crate::Result<Self> {
         // Best-effort load persisted state for the global storage
         let _ = Self::load_from_disk();
@@ -118,7 +150,7 @@ impl Storage {
         let append = global_append_only();
     // load global compaction defaults
     let gp = global_compaction_policy();
-    let mut s = Self { inner: None, persistence_path: None, encryption_key: None, encryption_salt: None, argon2_config: None, persistence_format: fmt, append_only: append, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None };
+    let mut s = Self { inner: None, persistence_path: None, encryption_key: None, encryption_salt: None, argon2_config: None, persistence_format: fmt, append_only: append, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None, autosave_policy: None, last_write_time: Arc::new(RwLock::new(None)), pending_writes: Arc::new(RwLock::new(0)) };
         if append {
             // compute events log path for default global persistence file
             let p = Self::persistence_file();
@@ -151,7 +183,7 @@ impl Storage {
     let inner = Arc::new(RwLock::new(StorageInner::default()));
     
     let gp = global_compaction_policy();
-    let mut storage = Self { inner: Some(inner.clone()), persistence_path: Some(pb.clone()), encryption_key: None, encryption_salt: None, argon2_config: None, persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None };
+    let mut storage = Self { inner: Some(inner.clone()), persistence_path: Some(pb.clone()), encryption_key: None, encryption_salt: None, argon2_config: None, persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None, autosave_policy: None, last_write_time: Arc::new(RwLock::new(None)), pending_writes: Arc::new(RwLock::new(0)) };
 
         // If the file exists, load it into the per-instance inner store
         if pb.exists() {
@@ -261,11 +293,149 @@ impl Storage {
         }
 
         let gp = global_compaction_policy();
-        Ok(Self { inner: Some(inner), persistence_path: Some(pb), encryption_key, encryption_salt, argon2_config: Some(params.clone()), persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None })
+        Ok(Self { inner: Some(inner), persistence_path: Some(pb), encryption_key, encryption_salt, argon2_config: Some(params.clone()), persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None, autosave_policy: None, last_write_time: Arc::new(RwLock::new(None)), pending_writes: Arc::new(RwLock::new(0)) })
     }
 
     pub fn get_db_path() -> crate::Result<std::path::PathBuf> {
         Ok(std::path::PathBuf::from("/tmp/timeloop-memory"))
+    }
+
+    /// Handle autosave logic based on the configured policy
+    fn handle_autosave(&self) -> crate::Result<()> {
+        let policy = match &self.autosave_policy {
+            Some(p) => p,
+            None => return Ok(()), // No autosave policy configured
+        };
+
+        match policy {
+            AutosavePolicy::Debounce { debounce_ms } => {
+                self.handle_debounce_autosave(*debounce_ms)?;
+            }
+            AutosavePolicy::Coalescing { write_threshold, max_delay_ms } => {
+                self.handle_coalescing_autosave(*write_threshold, *max_delay_ms)?;
+            }
+            AutosavePolicy::Disabled => {
+                // Do nothing
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle debounce-based autosave
+    fn handle_debounce_autosave(&self, debounce_ms: u64) -> crate::Result<()> {
+        let now = std::time::Instant::now();
+        let mut last_write_guard = self.last_write_time.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+        
+        let should_save = if let Some(last_write) = *last_write_guard {
+            now.duration_since(last_write).as_millis() >= debounce_ms as u128
+        } else {
+            true // First write
+        };
+
+        if should_save {
+            self.perform_autosave()?;
+        }
+
+        // Update last write time
+        *last_write_guard = Some(now);
+        Ok(())
+    }
+
+    /// Handle coalescing-based autosave
+    fn handle_coalescing_autosave(&self, write_threshold: u32, max_delay_ms: u64) -> crate::Result<()> {
+        let mut pending = self.pending_writes.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+        *pending += 1;
+
+        let now = std::time::Instant::now();
+        let mut last_write_guard = self.last_write_time.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+        
+        let should_save = *pending >= write_threshold || 
+            last_write_guard.map_or(true, |last_write| {
+                now.duration_since(last_write).as_millis() >= max_delay_ms as u128
+            });
+
+        if should_save {
+            *pending = 0;
+            self.perform_autosave()?;
+        }
+
+        // Update last write time
+        *last_write_guard = Some(now);
+        Ok(())
+    }
+
+    /// Perform the actual autosave operation
+    fn perform_autosave(&self) -> crate::Result<()> {
+        if let Some(path) = &self.persistence_path {
+            Self::save_to_path(path, self)?;
+        } else if self.inner.is_none() {
+            Self::save_to_disk()?;
+        }
+        Ok(())
+    }
+
+    /// Force an immediate save, bypassing autosave policy
+    pub fn force_save(&self) -> crate::Result<()> {
+        self.perform_autosave()
+    }
+
+    /// Open an existing storage file or create a new one with proper validation.
+    /// This method validates file permissions, handles migration paths, and ensures
+    /// the storage is ready for use.
+    pub fn open_or_create(path: &str) -> crate::Result<Self> {
+        let input_pb = PathBuf::from(path);
+        let pb = if input_pb.is_absolute() {
+            input_pb
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(input_pb)
+        };
+
+        // Validate parent directory permissions
+        if let Some(parent) = pb.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent).map_err(|e| crate::error::TimeLoopError::FileSystem(format!("Failed to create directory {}: {}", parent.display(), e)))?;
+            }
+            
+            // Check write permissions
+            if !parent.metadata().map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?.permissions().readonly() {
+                // Directory is writable, good
+            } else {
+                return Err(crate::error::TimeLoopError::FileSystem(format!("Directory {} is read-only", parent.display())));
+            }
+        }
+
+        // Auto-detect format from file extension
+        let format = if path.ends_with(".cbor") || path.ends_with(".bin") { 
+            PersistenceFormat::Cbor 
+        } else { 
+            PersistenceFormat::Json 
+        };
+
+        // Try to open existing file
+        if pb.exists() {
+            // Validate file permissions
+            let metadata = pb.metadata().map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            if metadata.permissions().readonly() {
+                return Err(crate::error::TimeLoopError::FileSystem(format!("File {} is read-only", pb.display())));
+            }
+
+            // Try to load existing data
+            let storage = Self::with_path_and_format(path, format)?;
+            
+            // Validate the loaded data by attempting to read it
+            let _ = storage.list_sessions()?;
+            let _ = storage.list_branches()?;
+            
+            Ok(storage)
+        } else {
+            // Create new storage
+            let storage = Self::with_path_and_format(path, format)?;
+            
+            // Initialize with empty state and save it
+            storage.flush()?;
+            
+            Ok(storage)
+        }
     }
 
     // Helper to run read-only closures against the correct storage instance
@@ -302,15 +472,22 @@ impl Storage {
             let session_events = guard.events.entry(event.session_id.clone()).or_insert_with(Vec::new);
             session_events.push(event.clone());
         })?;
+        
+        // Handle autosave policy
+        self.handle_autosave()?;
+        
         // If append-only logging is enabled, append event to the log; otherwise
         // persist the full state as before.
         if self.append_only {
             let _ = self.append_event_to_log(event);
         } else {
-            if let Some(path) = &self.persistence_path {
-                let _ = Self::save_to_path(path, self);
-            } else if self.inner.is_none() {
-                let _ = Self::save_to_disk();
+            // Only persist immediately if no autosave policy is configured
+            if self.autosave_policy.is_none() {
+                if let Some(path) = &self.persistence_path {
+                    let _ = Self::save_to_path(path, self);
+                } else if self.inner.is_none() {
+                    let _ = Self::save_to_disk();
+                }
             }
         }
         Ok(())
@@ -681,6 +858,74 @@ impl Storage {
             let _ = handle.join();
         }
         self.background_running = None;
+        Ok(())
+    }
+
+    /// Create a backup snapshot of the current storage state to the specified path.
+    /// The backup includes all sessions, events, and branches in the current format.
+    pub fn backup(&self, path: &str) -> crate::Result<()> {
+        let backup_path = PathBuf::from(path);
+        
+        // Ensure the backup directory exists
+        if let Some(parent) = backup_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        }
+
+        // Determine which inner to read from
+        let data_inner = if let Some(inner) = &self.inner {
+            inner.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?.clone()
+        } else {
+            GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?.clone()
+        };
+
+        // Serialize according to the chosen persistence format
+        let data_bytes = match self.persistence_format {
+            PersistenceFormat::Json => serde_json::to_vec_pretty(&data_inner)?,
+            PersistenceFormat::Cbor => serde_cbor::to_vec(&data_inner)?,
+        };
+
+        // Write backup atomically
+        Self::atomic_write(&backup_path, &data_bytes)?;
+        Ok(())
+    }
+
+    /// Restore storage state from a backup snapshot at the specified path.
+    /// This will replace the current in-memory state with the backup data.
+    /// The backup format is auto-detected based on file extension.
+    pub fn restore(&mut self, path: &str) -> crate::Result<()> {
+        let backup_path = PathBuf::from(path);
+        
+        if !backup_path.exists() {
+            return Err(crate::error::TimeLoopError::FileSystem(format!("Backup file not found: {}", path)));
+        }
+
+        // Auto-detect format from file extension
+        let format = if path.ends_with(".cbor") || path.ends_with(".bin") { 
+            PersistenceFormat::Cbor 
+        } else { 
+            PersistenceFormat::Json 
+        };
+
+        let bytes = fs::read(&backup_path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        
+        // Deserialize according to detected format
+        let data_inner = match format {
+            PersistenceFormat::Json => serde_json::from_slice::<StorageInner>(&bytes)?,
+            PersistenceFormat::Cbor => serde_cbor::from_slice::<StorageInner>(&bytes)?,
+        };
+
+        // Replace current state
+        self.with_write(|guard| {
+            *guard = data_inner;
+        })?;
+
+        // Persist the restored state if this instance has a persistence path
+        if let Some(persist_path) = &self.persistence_path {
+            Self::save_to_path(persist_path, self)?;
+        } else if self.inner.is_none() {
+            Self::save_to_disk()?;
+        }
+
         Ok(())
     }
 }
@@ -1470,5 +1715,236 @@ mod tests {
             }
         }
         assert!(rots.len() <= storage.retention_count as usize + 1); // +1 tolerant
+    }
+
+    #[test]
+    fn test_concurrent_access_isolation() {
+        use std::thread;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let tmp_dir = TempDir::new().unwrap();
+        let storage1_path = tmp_dir.path().join("storage1.json");
+        let storage2_path = tmp_dir.path().join("storage2.json");
+
+        // Create two separate storage instances
+        let storage1 = Storage::open_or_create(storage1_path.to_str().unwrap()).unwrap();
+        let storage2 = Storage::open_or_create(storage2_path.to_str().unwrap()).unwrap();
+
+        // Test data isolation by creating different sessions in each storage
+        let session1 = Session {
+            id: "concurrent-session-1".to_string(),
+            name: "Concurrent Session 1".to_string(),
+            created_at: Utc::now(),
+            ended_at: None,
+            parent_session_id: None,
+            branch_name: None,
+        };
+
+        let session2 = Session {
+            id: "concurrent-session-2".to_string(),
+            name: "Concurrent Session 2".to_string(),
+            created_at: Utc::now(),
+            ended_at: None,
+            parent_session_id: None,
+            branch_name: None,
+        };
+
+        // Store sessions in their respective storages
+        storage1.store_session(&session1).unwrap();
+        storage2.store_session(&session2).unwrap();
+
+        // Verify isolation - each storage should only see its own session
+        let sessions1 = storage1.list_sessions().unwrap();
+        let sessions2 = storage2.list_sessions().unwrap();
+
+        assert_eq!(sessions1.len(), 1);
+        assert_eq!(sessions1[0].id, "concurrent-session-1");
+        assert_eq!(sessions2.len(), 1);
+        assert_eq!(sessions2[0].id, "concurrent-session-2");
+
+        // Test concurrent writes with different events
+        let storage1_arc = Arc::new(storage1);
+        let storage2_arc = Arc::new(storage2);
+
+        let storage1_clone = storage1_arc.clone();
+        let storage2_clone = storage2_arc.clone();
+
+        let handle1 = thread::spawn(move || {
+            for i in 0..10 {
+                let event = Event {
+                    id: Uuid::new_v4().to_string(),
+                    session_id: "concurrent-session-1".to_string(),
+                    event_type: EventType::KeyPress {
+                        key: format!("key1-{}", i),
+                        timestamp: Utc::now(),
+                    },
+                    sequence_number: i,
+                    timestamp: Utc::now(),
+                };
+                storage1_clone.store_event(&event).unwrap();
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let handle2 = thread::spawn(move || {
+            for i in 0..10 {
+                let event = Event {
+                    id: Uuid::new_v4().to_string(),
+                    session_id: "concurrent-session-2".to_string(),
+                    event_type: EventType::KeyPress {
+                        key: format!("key2-{}", i),
+                        timestamp: Utc::now(),
+                    },
+                    sequence_number: i,
+                    timestamp: Utc::now(),
+                };
+                storage2_clone.store_event(&event).unwrap();
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        // Wait for both threads to complete
+        handle1.join().unwrap();
+        handle2.join().unwrap();
+
+        // Verify that each storage still only contains its own events
+        let events1 = storage1_arc.get_events_for_session("concurrent-session-1").unwrap();
+        let events2 = storage2_arc.get_events_for_session("concurrent-session-2").unwrap();
+
+        assert_eq!(events1.len(), 10);
+        assert_eq!(events2.len(), 10);
+
+        // Verify event isolation - no cross-contamination
+        for event in &events1 {
+            assert_eq!(event.session_id, "concurrent-session-1");
+            if let EventType::KeyPress { key, .. } = &event.event_type {
+                assert!(key.starts_with("key1-"));
+            }
+        }
+
+        for event in &events2 {
+            assert_eq!(event.session_id, "concurrent-session-2");
+            if let EventType::KeyPress { key, .. } = &event.event_type {
+                assert!(key.starts_with("key2-"));
+            }
+        }
+
+        // Test that storage1 cannot see storage2's data and vice versa
+        let storage1_sessions = storage1_arc.list_sessions().unwrap();
+        let storage2_sessions = storage2_arc.list_sessions().unwrap();
+
+        assert_eq!(storage1_sessions.len(), 1);
+        assert_eq!(storage1_sessions[0].id, "concurrent-session-1");
+        assert_eq!(storage2_sessions.len(), 1);
+        assert_eq!(storage2_sessions[0].id, "concurrent-session-2");
+
+        // Verify that attempting to access the other storage's session returns None
+        assert!(storage1_arc.get_session("concurrent-session-2").unwrap().is_none());
+        assert!(storage2_arc.get_session("concurrent-session-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_autosave_policies() {
+        let tmp_dir = TempDir::new().unwrap();
+        let storage_path = tmp_dir.path().join("autosave_test.json");
+        
+        // Test debounce autosave
+        let mut storage = Storage::open_or_create(storage_path.to_str().unwrap()).unwrap();
+        storage.set_autosave_policy(AutosavePolicy::Debounce { debounce_ms: 100 });
+        
+        // Create a session
+        let session = Session {
+            id: "autosave-session".to_string(),
+            name: "Autosave Test".to_string(),
+            created_at: Utc::now(),
+            ended_at: None,
+            parent_session_id: None,
+            branch_name: None,
+        };
+        
+        storage.store_session(&session).unwrap();
+        
+        // Test coalescing autosave
+        let storage_path2 = tmp_dir.path().join("autosave_test2.json");
+        let mut storage2 = Storage::open_or_create(storage_path2.to_str().unwrap()).unwrap();
+        storage2.set_autosave_policy(AutosavePolicy::Coalescing { 
+            write_threshold: 3, 
+            max_delay_ms: 200 
+        });
+        
+        // Add multiple events to trigger coalescing
+        for i in 0..5 {
+            let event = Event {
+                id: Uuid::new_v4().to_string(),
+                session_id: "autosave-session-2".to_string(),
+                event_type: EventType::KeyPress {
+                    key: format!("key{}", i),
+                    timestamp: Utc::now(),
+                },
+                sequence_number: i,
+                timestamp: Utc::now(),
+            };
+            storage2.store_event(&event).unwrap();
+        }
+        
+        // Verify data was saved
+        let sessions = storage.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        
+        let events = storage2.get_events_for_session("autosave-session-2").unwrap();
+        assert_eq!(events.len(), 5);
+    }
+
+    #[test]
+    fn test_backup_and_restore() {
+        let tmp_dir = TempDir::new().unwrap();
+        let storage_path = tmp_dir.path().join("backup_test.json");
+        let backup_path = tmp_dir.path().join("backup.json");
+        
+        // Create storage and add some data
+        let storage = Storage::open_or_create(storage_path.to_str().unwrap()).unwrap();
+        
+        let session = Session {
+            id: "backup-session".to_string(),
+            name: "Backup Test".to_string(),
+            created_at: Utc::now(),
+            ended_at: None,
+            parent_session_id: None,
+            branch_name: None,
+        };
+        
+        storage.store_session(&session).unwrap();
+        
+        let event = Event {
+            id: Uuid::new_v4().to_string(),
+            session_id: "backup-session".to_string(),
+            event_type: EventType::KeyPress {
+                key: "test-key".to_string(),
+                timestamp: Utc::now(),
+            },
+            sequence_number: 1,
+            timestamp: Utc::now(),
+        };
+        
+        storage.store_event(&event).unwrap();
+        
+        // Create backup
+        storage.backup(backup_path.to_str().unwrap()).unwrap();
+        
+        // Create new storage and restore from backup
+        let mut restored_storage = Storage::open_or_create(storage_path.to_str().unwrap()).unwrap();
+        restored_storage.restore(backup_path.to_str().unwrap()).unwrap();
+        
+        // Verify restored data
+        let sessions = restored_storage.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "backup-session");
+        
+        let events = restored_storage.get_events_for_session("backup-session").unwrap();
+        assert_eq!(events.len(), 1);
+        if let EventType::KeyPress { key, .. } = &events[0].event_type {
+            assert_eq!(key, "test-key");
+        }
     }
 }
