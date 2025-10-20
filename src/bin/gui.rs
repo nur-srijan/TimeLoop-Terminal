@@ -1,6 +1,6 @@
 #![cfg(feature = "gui")]
 
-use eframe::{egui, epi};
+use eframe::egui;
 use timeloop_terminal::{SessionManager, ReplayEngine};
 
 // Minimal GUI app that lists sessions and shows summary + simple replay controls
@@ -32,10 +32,8 @@ impl Default for TimeLoopGui {
     }
 }
 
-impl epi::App for TimeLoopGui {
-    fn name(&self) -> &str { "TimeLoop Terminal - GUI" }
-
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut epi::Frame) {
+impl eframe::App for TimeLoopGui {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.heading("TimeLoop Terminal (GUI)");
         });
@@ -111,7 +109,9 @@ impl epi::App for TimeLoopGui {
                     // Playback advancement
                     if self.playing {
                         // advance position based on frame time and speed
-                        let delta = (ctx.input(|i| i.unstable_dt)).unwrap_or(1.0) as f32;
+                        // `ctx.input(|i| i.unstable_dt)` returns f32 (not Option), so use it and fallback to 1.0 if zero
+                        let delta = ctx.input(|i| i.unstable_dt);
+                        let delta = if delta == 0.0 { 1.0 } else { delta };
                         self.position_ms += ((delta * 1000.0) as f64 * (self.speed as f64)) as i64;
                         if self.position_ms > rs.duration.num_milliseconds() {
                             self.position_ms = rs.duration.num_milliseconds();

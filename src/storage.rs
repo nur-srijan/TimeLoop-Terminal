@@ -140,8 +140,16 @@ impl Storage {
     }
 
     pub fn with_path_and_format(path: &str, format: PersistenceFormat) -> crate::Result<Self> {
-        let pb = PathBuf::from(path);
-        let inner = Arc::new(RwLock::new(StorageInner::default()));
+        // Resolve relative paths against the current working directory so tests
+        // that pass plain filenames write/read to the same location.
+        let input_pb = PathBuf::from(path);
+        let pb = if input_pb.is_absolute() {
+            input_pb
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(input_pb)
+        };
+    let inner = Arc::new(RwLock::new(StorageInner::default()));
+    
     let gp = global_compaction_policy();
     let mut storage = Self { inner: Some(inner.clone()), persistence_path: Some(pb.clone()), encryption_key: None, encryption_salt: None, argon2_config: None, persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None };
 
@@ -444,7 +452,8 @@ impl Storage {
     // Helper to atomically write bytes to a file path. Writes to a temporary file in
     // the same directory and then renames into place.
     fn atomic_write(path: &PathBuf, bytes: &[u8]) -> crate::Result<()> {
-        let parent = path.parent().ok_or_else(|| crate::error::TimeLoopError::FileSystem("Invalid path".to_string()))?;
+        // If path has no parent (e.g., filename in current dir) use current directory
+        let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
         let mut tmp = parent.join(".tmp_timeloop");
         // add a random suffix to avoid collisions
         let mut osrng = rand::rngs::OsRng;
@@ -528,7 +537,10 @@ impl Storage {
         if should_rotate {
             // create rotated name with timestamp
             let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
-            let rotated = log_path.with_extension(format!("rot.{}", ts));
+            // Append an extra .rot.<ts> suffix so rotated files keep the original
+            // log filename as a prefix (e.g. state.json.events.jsonl.rot.20250101T...)
+            let fname = log_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let rotated = log_path.with_file_name(format!("{}.rot.{}", fname, ts));
             std::fs::rename(&log_path, &rotated).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             // create new empty log file
             std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&log_path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
@@ -620,7 +632,8 @@ impl Storage {
                         }
                         if should_rotate {
                             let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
-                            let rotated = log_path.with_extension(format!("rot.{}", ts));
+                            let fname = log_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                            let rotated = log_path.with_file_name(format!("{}.rot.{}", fname, ts));
                             let _ = std::fs::rename(&log_path, &rotated);
                             let _ = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&log_path);
                             // retention enforcement best-effort
@@ -733,6 +746,7 @@ impl Storage {
     // Save to a per-instance path. Serialize the current inner state (either global
     // or the instance's inner) and write it to the provided path.
     fn save_to_path(path: &PathBuf, storage: &Storage) -> crate::Result<()> {
+    
         // Determine which inner to read from
         let data_inner = if let Some(inner) = &storage.inner {
             inner.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?.clone()
@@ -745,6 +759,7 @@ impl Storage {
             PersistenceFormat::Json => serde_json::to_vec_pretty(&data_inner)?,
             PersistenceFormat::Cbor => serde_cbor::to_vec(&data_inner)?,
         };
+        
          // If encryption is enabled on this storage, encrypt the blob and write a wrapper
          if let Some(key) = &storage.encryption_key {
              // reuse salt if present
@@ -1168,11 +1183,11 @@ mod tests {
         // Flush to persist
         storage.flush().unwrap();
 
-        // Drop storage to close file handles
-        drop(storage);
+    // Drop storage to close file handles
+    drop(storage);
 
-        // Reopen storage
-        let storage = Storage::with_path("test-persistence-roundtrip").unwrap();
+    // Reopen storage using the same temp file path
+    let storage = Storage::with_path(state_file.to_str().unwrap()).unwrap();
 
         // Verify restored state
         let sessions = storage.list_sessions().unwrap();
@@ -1424,8 +1439,9 @@ mod tests {
         // Force compaction/rotation
         storage.compact().unwrap();
 
-        // Check rotated files exist (at least one rot file)
-        let events_path = storage.events_log_path.unwrap();
+    // Check rotated files exist (at least one rot file)
+    // clone to avoid moving out of `storage` so we can call `storage.compact()` later
+    let events_path = storage.events_log_path.clone().unwrap();
         let dir = events_path.parent().unwrap();
         let mut rotated_count = 0usize;
         for entry in std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()) {
