@@ -5,8 +5,20 @@ permissions:
 on:
   push:
     branches: [ main ]
+    path-ignore:
+      - ".github/workflows/release.yml"
+      - "docs/**"
+      - "*.md"
+      - "LICENSE"
+      - ".cursorrules"
   pull_request:
     branches: [ main ]
+    path-ignore:
+      - ".github/workflows/release.yml"
+      - "docs/**"
+      - "*.md"
+      - "LICENSE"
+      - ".cursorrules"
 
 jobs:
   build:

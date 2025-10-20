@@ -12,9 +12,21 @@ name: rust-clippy analyze
 on:
   push:
     branches: [ "main" ]
+    path-ignore:
+      - ".github/workflows/release.yml"
+      - "docs/**"
+      - "*.md"
+      - "LICENSE"
+      - ".cursorrules"
   pull_request:
     # The branches below must be a subset of the branches above
     branches: [ "main" ]
+    path-ignore:
+      - ".github/workflows/release.yml"
+      - "docs/**"
+      - "*.md"
+      - "LICENSE"
+      - ".cursorrules"
   schedule:
     - cron: '32 10 * * 2'
 
