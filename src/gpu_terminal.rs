@@ -1,17 +1,14 @@
 use std::sync::Arc;
 use std::collections::VecDeque;
+use std::io::Write;
 use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode},
     style::{Color, SetForegroundColor, ResetColor},
     ExecutableCommand,
 };
 use tokio::task::JoinHandle;
-use crate::{EventRecorder, TimeLoopError, FileChangeType, GpuRenderer};
+use crate::{EventRecorder, TimeLoopError, FileChangeType};
 use crate::file_watcher::FileWatcher;
-use winit::{
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-};
 
 /// GPU-enabled terminal emulator that renders text using wgpu
 pub struct GpuTerminalEmulator {
@@ -19,7 +16,7 @@ pub struct GpuTerminalEmulator {
     working_directory: String,
     file_watcher_handle: Option<JoinHandle<()>>,
     command_history: VecDeque<String>,
-    gpu_renderer: Option<GpuRenderer>,
+    // gpu_renderer: Option<GpuRenderer>, // Temporarily disabled
     terminal_buffer: Vec<String>,
     cursor_x: usize,
     cursor_y: usize,
@@ -39,7 +36,7 @@ impl GpuTerminalEmulator {
             working_directory,
             file_watcher_handle: None,
             command_history: VecDeque::with_capacity(100),
-            gpu_renderer: None,
+            // gpu_renderer: None, // Temporarily disabled
             terminal_buffer: vec![String::new()],
             cursor_x: 0,
             cursor_y: 0,
@@ -161,11 +158,12 @@ impl GpuTerminalEmulator {
     }
     
     /// Render the terminal using GPU
-    pub fn render_gpu(&mut self, time: f32) -> Result<(), TimeLoopError> {
-        if let Some(ref mut renderer) = self.gpu_renderer {
-            let content = self.get_terminal_content();
-            renderer.render(&content, time)?;
-        }
+    pub fn render_gpu(&mut self, _time: f32) -> Result<(), TimeLoopError> {
+        // Temporarily disabled GPU rendering
+        // if let Some(ref mut renderer) = self.gpu_renderer {
+        //     let content = self.get_terminal_content();
+        //     renderer.render(&content, time)?;
+        // }
         Ok(())
     }
     

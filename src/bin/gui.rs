@@ -1,10 +1,7 @@
 #![cfg(feature = "gui")]
 
 use eframe::egui;
-use timeloop_terminal::{SessionManager, ReplayEngine, Storage, TimeLoopError};
-use std::sync::Arc;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use timeloop_terminal::{SessionManager, ReplayEngine};
 
 // Enhanced GUI app with comprehensive features
 struct TimeLoopGui {
@@ -25,7 +22,7 @@ struct TimeLoopGui {
     show_export_dialog: bool,
     
     // Settings
-    api_keys: HashMap<String, String>,
+    api_keys: std::collections::HashMap<String, String>,
     ai_model: String,
     theme: String,
     auto_refresh: bool,
@@ -53,7 +50,7 @@ impl Default for TimeLoopGui {
             }
         }
         
-        let mut api_keys = HashMap::new();
+        let mut api_keys = std::collections::HashMap::new();
         api_keys.insert("openai".to_string(), String::new());
         api_keys.insert("anthropic".to_string(), String::new());
         api_keys.insert("local".to_string(), String::new());
@@ -338,7 +335,7 @@ impl TimeLoopGui {
     }
 
     fn create_new_session(&mut self) {
-        if let Ok(sm) = SessionManager::new() {
+        if let Ok(mut sm) = SessionManager::new() {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -359,7 +356,7 @@ impl TimeLoopGui {
 
     fn delete_selected_session(&mut self) {
         if let Some(ref session_id) = self.selected {
-            if let Ok(sm) = SessionManager::new() {
+            if let Ok(mut sm) = SessionManager::new() {
                 match sm.delete_session(session_id) {
                     Ok(_) => {
                         self.success_message = Some("Session deleted successfully".to_string());
@@ -469,8 +466,10 @@ impl TimeLoopGui {
                 ui.painter().rect_filled(filled, 4.0, egui::Color32::LIGHT_GREEN);
                 
                 if response.dragged() {
-                    let new_fraction = (response.interact_pointer_pos().unwrap().x - rect.min.x) / rect.width();
-                    self.position_ms = ((new_fraction * rs.duration.num_milliseconds() as f32) as i64).max(0);
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        let new_fraction = (pos.x - rect.min.x) / rect.width();
+                        self.position_ms = ((new_fraction * rs.duration.num_milliseconds() as f32) as i64).max(0);
+                    }
                 }
             });
 
@@ -519,8 +518,9 @@ impl TimeLoopGui {
     }
 
     fn show_settings_dialog(&mut self, ctx: &egui::Context) {
+        let mut show_settings = self.show_settings;
         egui::Window::new("Settings")
-            .open(&mut self.show_settings)
+            .open(&mut show_settings)
             .show(ctx, |ui| {
                 ui.heading("API Keys");
                 ui.separator();
@@ -559,11 +559,13 @@ impl TimeLoopGui {
                     }
                 });
             });
+        self.show_settings = show_settings;
     }
 
     fn show_import_dialog(&mut self, ctx: &egui::Context) {
+        let mut show_import_dialog = self.show_import_dialog;
         egui::Window::new("Import Session")
-            .open(&mut self.show_import_dialog)
+            .open(&mut show_import_dialog)
             .show(ctx, |ui| {
                 ui.label("Import session from file:");
                 ui.text_edit_singleline(&mut self.import_path);
@@ -587,11 +589,13 @@ impl TimeLoopGui {
                     }
                 });
             });
+        self.show_import_dialog = show_import_dialog;
     }
 
     fn show_export_dialog(&mut self, ctx: &egui::Context) {
+        let mut show_export_dialog = self.show_export_dialog;
         egui::Window::new("Export Session")
-            .open(&mut self.show_export_dialog)
+            .open(&mut show_export_dialog)
             .show(ctx, |ui| {
                 ui.label("Export session to file:");
                 ui.text_edit_singleline(&mut self.export_path);
@@ -614,30 +618,31 @@ impl TimeLoopGui {
                     }
                 });
             });
+        self.show_export_dialog = show_export_dialog;
     }
 
     fn show_messages(&mut self, ctx: &egui::Context) {
-        if let Some(ref message) = self.error_message {
+        if let Some(message) = self.error_message.take() {
             egui::Window::new("Error")
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.colored_label(egui::Color32::RED, message);
+                    ui.colored_label(egui::Color32::RED, &message);
                     ui.horizontal(|ui| {
                         if ui.button("OK").clicked() {
-                            self.error_message = None;
+                            // Message will be cleared by the take() above
                         }
                     });
                 });
         }
 
-        if let Some(ref message) = self.success_message {
+        if let Some(message) = self.success_message.take() {
             egui::Window::new("Success")
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.colored_label(egui::Color32::GREEN, message);
+                    ui.colored_label(egui::Color32::GREEN, &message);
                     ui.horizontal(|ui| {
                         if ui.button("OK").clicked() {
-                            self.success_message = None;
+                            // Message will be cleared by the take() above
                         }
                     });
                 });
