@@ -9,6 +9,9 @@ pub mod file_watcher;
 #[cfg(feature = "ai")]
 pub mod ai;
 
+#[cfg(feature = "gui")]
+pub mod gui;
+
 pub use error::TimeLoopError;
 pub use session::{SessionManager, Session, SessionSummary};
 pub use terminal::TerminalEmulator;

@@ -2,6 +2,57 @@ use serde::{Deserialize, Serialize};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, CONTENT_TYPE, USER_AGENT};
 use crate::{Storage, EventType};
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ApiProvider {
+    OpenRouter,
+    OpenAI,
+}
+
+impl ApiProvider {
+    pub fn from_env() -> crate::Result<Self> {
+        // Check for OpenAI API key first, then OpenRouter
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            Ok(ApiProvider::OpenAI)
+        } else if std::env::var("OPENROUTER_API_KEY").is_ok() {
+            Ok(ApiProvider::OpenRouter)
+        } else {
+            Err(crate::error::TimeLoopError::Configuration(
+                "Neither OPENAI_API_KEY nor OPENROUTER_API_KEY environment variable found".to_string()
+            ))
+        }
+    }
+
+    pub fn base_url(&self) -> String {
+        match self {
+            ApiProvider::OpenAI => "https://api.openai.com/v1".to_string(),
+            ApiProvider::OpenRouter => {
+                std::env::var("OPENROUTER_BASE_URL")
+                    .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string())
+            }
+        }
+    }
+
+    pub fn api_key(&self) -> crate::Result<String> {
+        match self {
+            ApiProvider::OpenAI => {
+                std::env::var("OPENAI_API_KEY")
+                    .map_err(|_| crate::error::TimeLoopError::Configuration("Missing OPENAI_API_KEY".to_string()))
+            }
+            ApiProvider::OpenRouter => {
+                std::env::var("OPENROUTER_API_KEY")
+                    .map_err(|_| crate::error::TimeLoopError::Configuration("Missing OPENROUTER_API_KEY".to_string()))
+            }
+        }
+    }
+
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            ApiProvider::OpenAI => "gpt-3.5-turbo",
+            ApiProvider::OpenRouter => "openrouter/auto",
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ChatMessage {
     role: String,
@@ -55,16 +106,18 @@ fn build_timeline(storage: &Storage, session_id: &str, max_items: usize) -> crat
     Ok(lines.join("\n"))
 }
 
-pub async fn summarize_session(session_id: &str, model: &str) -> crate::Result<String> {
+pub async fn summarize_session(session_id: &str, model: Option<&str>, provider: Option<ApiProvider>) -> crate::Result<String> {
     let storage = Storage::new()?;
     let timeline = build_timeline(&storage, session_id, 200)?;
     let prompt = format!("You are an expert assistant. Summarize the following terminal session succinctly with key actions, commands run, files changed, and possible next steps.\n\n{}", timeline);
 
-    let api_key = std::env::var("OPENROUTER_API_KEY")
-        .map_err(|_| crate::error::TimeLoopError::Configuration("Missing OPENROUTER_API_KEY".to_string()))?;
-    let base = std::env::var("OPENROUTER_BASE_URL").unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
+    // Determine API provider
+    let api_provider = provider.unwrap_or_else(|| ApiProvider::from_env().unwrap_or(ApiProvider::OpenRouter));
+    let api_key = api_provider.api_key()?;
+    let base_url = api_provider.base_url();
+    let model_name = model.unwrap_or(api_provider.default_model());
 
-    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", api_key)).unwrap());
@@ -72,7 +125,7 @@ pub async fn summarize_session(session_id: &str, model: &str) -> crate::Result<S
     headers.insert(USER_AGENT, HeaderValue::from_static("timeloop-terminal/ai"));
 
     let body = ChatRequest {
-        model: model.to_string(),
+        model: model_name.to_string(),
         messages: vec![
             ChatMessage { role: "system".to_string(), content: "You are a concise expert assistant for terminal session summaries.".to_string() },
             ChatMessage { role: "user".to_string(), content: prompt },
@@ -88,11 +141,94 @@ pub async fn summarize_session(session_id: &str, model: &str) -> crate::Result<S
         .map_err(|e| crate::error::TimeLoopError::Unknown(e.to_string()))?;
 
     if !resp.status().is_success() {
-        return Err(crate::error::TimeLoopError::Unknown(format!("OpenRouter request failed: {}", resp.status())));
+        let status = resp.status();
+        let error_text = resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(crate::error::TimeLoopError::Unknown(format!("API request failed ({}): {}", status, error_text)));
     }
 
     let parsed: ChatResponse = resp.json().await.map_err(|e| crate::error::TimeLoopError::Unknown(e.to_string()))?;
     let content = parsed.choices.get(0).map(|c| c.message.content.clone()).unwrap_or_else(|| "No response".to_string());
     Ok(content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_api_provider_from_env() {
+        // Test with OpenAI key
+        std::env::set_var("OPENAI_API_KEY", "test-key");
+        std::env::remove_var("OPENROUTER_API_KEY");
+        
+        let provider = ApiProvider::from_env().unwrap();
+        assert_eq!(provider, ApiProvider::OpenAI);
+        assert_eq!(provider.base_url(), "https://api.openai.com/v1");
+        assert_eq!(provider.default_model(), "gpt-3.5-turbo");
+        
+        // Test with OpenRouter key
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::set_var("OPENROUTER_API_KEY", "test-key");
+        
+        let provider = ApiProvider::from_env().unwrap();
+        assert_eq!(provider, ApiProvider::OpenRouter);
+        assert_eq!(provider.base_url(), "https://openrouter.ai/api/v1");
+        assert_eq!(provider.default_model(), "openrouter/auto");
+        
+        // Test with custom OpenRouter URL
+        std::env::set_var("OPENROUTER_BASE_URL", "https://custom.openrouter.com/api/v1");
+        let provider = ApiProvider::from_env().unwrap();
+        assert_eq!(provider.base_url(), "https://custom.openrouter.com/api/v1");
+        
+        // Clean up
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("OPENROUTER_API_KEY");
+        std::env::remove_var("OPENROUTER_BASE_URL");
+    }
+
+    #[test]
+    fn test_api_provider_no_keys() {
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("OPENROUTER_API_KEY");
+        
+        let result = ApiProvider::from_env();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Neither OPENAI_API_KEY nor OPENROUTER_API_KEY"));
+    }
+
+    #[test]
+    fn test_api_provider_precedence() {
+        // OpenAI should take precedence when both are present
+        std::env::set_var("OPENAI_API_KEY", "openai-key");
+        std::env::set_var("OPENROUTER_API_KEY", "openrouter-key");
+        
+        let provider = ApiProvider::from_env().unwrap();
+        assert_eq!(provider, ApiProvider::OpenAI);
+        
+        // Clean up
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("OPENROUTER_API_KEY");
+    }
+
+    #[test]
+    fn test_api_key_retrieval() {
+        std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+        std::env::set_var("OPENROUTER_API_KEY", "test-openrouter-key");
+        
+        let openai_provider = ApiProvider::OpenAI;
+        let openrouter_provider = ApiProvider::OpenRouter;
+        
+        assert_eq!(openai_provider.api_key().unwrap(), "test-openai-key");
+        assert_eq!(openrouter_provider.api_key().unwrap(), "test-openrouter-key");
+        
+        // Clean up
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("OPENROUTER_API_KEY");
+    }
+}
+
+// Backward compatibility function
+pub async fn summarize_session_legacy(session_id: &str, model: &str) -> crate::Result<String> {
+    summarize_session(session_id, Some(model), None).await
 }
 
