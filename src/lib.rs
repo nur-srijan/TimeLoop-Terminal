@@ -6,6 +6,8 @@ pub mod replay;
 pub mod branch;
 pub mod storage;
 pub mod file_watcher;
+pub mod gpu_renderer;
+pub mod gpu_terminal;
 #[cfg(feature = "ai")]
 pub mod ai;
 
@@ -16,6 +18,8 @@ pub use events::{EventRecorder, Event, EventType, FileChangeType};
 pub use replay::ReplayEngine;
 pub use branch::{TimelineBranch, BranchManager};
 pub use storage::Storage;
+pub use gpu_renderer::{GpuRenderer, GlyphInstance, Uniforms};
+pub use gpu_terminal::GpuTerminalEmulator;
 
 /// Re-export commonly used types
 pub type Result<T> = std::result::Result<T, TimeLoopError>;
