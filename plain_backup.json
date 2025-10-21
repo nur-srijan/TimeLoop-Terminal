@@ -1,0 +1,11 @@
+{
+  "session": {
+    "id": "plain-session",
+    "name": "Plain Session",
+    "created_at": "2025-10-21T08:20:45.751261286Z",
+    "ended_at": null,
+    "parent_session_id": null,
+    "branch_name": null
+  },
+  "events": []
+}
