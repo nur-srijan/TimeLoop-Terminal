@@ -154,9 +154,20 @@ pub async fn summarize_session(session_id: &str, model: Option<&str>, provider: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Use a mutex to ensure tests run sequentially and don't interfere with each other
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_api_provider_from_env() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        
+        // Save original values
+        let openai_key = std::env::var("OPENAI_API_KEY").ok();
+        let openrouter_key = std::env::var("OPENROUTER_API_KEY").ok();
+        let openrouter_url = std::env::var("OPENROUTER_BASE_URL").ok();
+        
         // Test with OpenAI key
         std::env::set_var("OPENAI_API_KEY", "test-key");
         std::env::remove_var("OPENROUTER_API_KEY");
@@ -180,24 +191,57 @@ mod tests {
         let provider = ApiProvider::from_env().unwrap();
         assert_eq!(provider.base_url(), "https://custom.openrouter.com/api/v1");
         
-        // Clean up
-        std::env::remove_var("OPENAI_API_KEY");
-        std::env::remove_var("OPENROUTER_API_KEY");
-        std::env::remove_var("OPENROUTER_BASE_URL");
+        // Restore original values
+        if let Some(key) = openai_key {
+            std::env::set_var("OPENAI_API_KEY", key);
+        } else {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        if let Some(key) = openrouter_key {
+            std::env::set_var("OPENROUTER_API_KEY", key);
+        } else {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+        if let Some(url) = openrouter_url {
+            std::env::set_var("OPENROUTER_BASE_URL", url);
+        } else {
+            std::env::remove_var("OPENROUTER_BASE_URL");
+        }
     }
 
     #[test]
     fn test_api_provider_no_keys() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        
+        // Save original values
+        let openai_key = std::env::var("OPENAI_API_KEY").ok();
+        let openrouter_key = std::env::var("OPENROUTER_API_KEY").ok();
+        
+        // Remove environment variables
         std::env::remove_var("OPENAI_API_KEY");
         std::env::remove_var("OPENROUTER_API_KEY");
         
         let result = ApiProvider::from_env();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Neither OPENAI_API_KEY nor OPENROUTER_API_KEY"));
+        
+        // Restore original values
+        if let Some(key) = openai_key {
+            std::env::set_var("OPENAI_API_KEY", key);
+        }
+        if let Some(key) = openrouter_key {
+            std::env::set_var("OPENROUTER_API_KEY", key);
+        }
     }
 
     #[test]
     fn test_api_provider_precedence() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        
+        // Save original values
+        let openai_key = std::env::var("OPENAI_API_KEY").ok();
+        let openrouter_key = std::env::var("OPENROUTER_API_KEY").ok();
+        
         // OpenAI should take precedence when both are present
         std::env::set_var("OPENAI_API_KEY", "openai-key");
         std::env::set_var("OPENROUTER_API_KEY", "openrouter-key");
@@ -205,25 +249,50 @@ mod tests {
         let provider = ApiProvider::from_env().unwrap();
         assert_eq!(provider, ApiProvider::OpenAI);
         
-        // Clean up
-        std::env::remove_var("OPENAI_API_KEY");
-        std::env::remove_var("OPENROUTER_API_KEY");
+        // Restore original values
+        if let Some(key) = openai_key {
+            std::env::set_var("OPENAI_API_KEY", key);
+        } else {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        if let Some(key) = openrouter_key {
+            std::env::set_var("OPENROUTER_API_KEY", key);
+        } else {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
     }
 
     #[test]
     fn test_api_key_retrieval() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        
+        // Save original values
+        let openai_key = std::env::var("OPENAI_API_KEY").ok();
+        let openrouter_key = std::env::var("OPENROUTER_API_KEY").ok();
+        
+        // Test OpenAI key retrieval
         std::env::set_var("OPENAI_API_KEY", "test-openai-key");
-        std::env::set_var("OPENROUTER_API_KEY", "test-openrouter-key");
-        
+        std::env::remove_var("OPENROUTER_API_KEY"); // Ensure OpenRouter key is not set
         let openai_provider = ApiProvider::OpenAI;
-        let openrouter_provider = ApiProvider::OpenRouter;
-        
         assert_eq!(openai_provider.api_key().unwrap(), "test-openai-key");
+        
+        // Test OpenRouter key retrieval
+        std::env::remove_var("OPENAI_API_KEY"); // Ensure OpenAI key is not set
+        std::env::set_var("OPENROUTER_API_KEY", "test-openrouter-key");
+        let openrouter_provider = ApiProvider::OpenRouter;
         assert_eq!(openrouter_provider.api_key().unwrap(), "test-openrouter-key");
         
-        // Clean up
-        std::env::remove_var("OPENAI_API_KEY");
-        std::env::remove_var("OPENROUTER_API_KEY");
+        // Restore original values
+        if let Some(key) = openai_key {
+            std::env::set_var("OPENAI_API_KEY", key);
+        } else {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        if let Some(key) = openrouter_key {
+            std::env::set_var("OPENROUTER_API_KEY", key);
+        } else {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
     }
 }
 

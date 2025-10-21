@@ -1,13 +1,13 @@
 #![cfg(feature = "gui")]
 
 use eframe::egui;
-use timeloop_terminal::{SessionManager, ReplayEngine};
+use crate::{SessionManager, ReplayEngine};
 
 // Minimal GUI app that lists sessions and shows summary + simple replay controls
 struct TimeLoopGui {
-    sessions: Vec<timeloop_terminal::session::Session>,
+    sessions: Vec<crate::session::Session>,
     selected: Option<String>,
-    replay_summary: Option<timeloop_terminal::replay::ReplaySummary>,
+    replay_summary: Option<crate::replay::ReplaySummary>,
     playing: bool,
     speed: f32,
     position_ms: i64,
@@ -132,7 +132,7 @@ impl eframe::App for TimeLoopGui {
 
 pub fn run_gui() {
     let options = eframe::NativeOptions::default();
-    eframe::run_native(
+    let _ = eframe::run_native(
         "TimeLoop Terminal GUI",
         options,
         Box::new(|_cc| Box::new(TimeLoopGui::default())),
