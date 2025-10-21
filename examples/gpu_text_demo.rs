@@ -1,7 +1,7 @@
-use timeloop_terminal::gpu_renderer::*;
+use timeloop_terminal::GpuRenderer;
 use winit::{
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::EventLoop,
     window::WindowBuilder,
 };
 
@@ -12,10 +12,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Create window
     let event_loop = EventLoop::new()?;
-    let window = WindowBuilder::new()
-        .with_title("TimeLoop Terminal - GPU Text Demo")
-        .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
-        .build(&event_loop)?;
+    let window = event_loop.create_window(
+        winit::window::WindowAttributes::default()
+            .with_title("TimeLoop Terminal - GPU Text Demo")
+            .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
+    )?;
     
     // Create GPU renderer
     let mut renderer = GpuRenderer::new(&window).await?;
@@ -26,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut time = 0.0;
     
     // Run event loop
-    event_loop.run(move |event, elwt| {
+    event_loop.run_app(move |event, elwt| {
         match event {
             Event::WindowEvent {
                 ref event,

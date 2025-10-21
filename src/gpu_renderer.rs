@@ -8,14 +8,12 @@ use bytemuck::{Pod, Zeroable};
 use crate::TimeLoopError;
 
 /// Core GPU renderer for text rendering with wgpu
-pub struct GpuRenderer<'a> {
+pub struct GpuRenderer {
     device: Arc<Device>,
     queue: Arc<Queue>,
-    surface: Surface<'a>,
+    surface: Surface<'static>,
     surface_config: SurfaceConfiguration,
     render_pipeline: RenderPipeline,
-    atlas_texture: Texture,
-    atlas_sampler: Sampler,
     instance_buffer: Buffer,
     uniform_buffer: Buffer,
     bind_group: BindGroup,
@@ -25,7 +23,7 @@ pub struct GpuRenderer<'a> {
 
 /// Glyph instance data for instanced rendering
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug)]
 pub struct GlyphInstance {
     pub pos: [f32; 2],           // x, y position in pixels
     pub size: [f32; 2],          // width, height
@@ -36,9 +34,12 @@ pub struct GlyphInstance {
     pub _padding: u16,           // padding for alignment
 }
 
+unsafe impl Pod for GlyphInstance {}
+unsafe impl Zeroable for GlyphInstance {}
+
 /// Uniform buffer data
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug)]
 pub struct Uniforms {
     pub projection: Mat4,
     pub time: f32,
@@ -46,9 +47,13 @@ pub struct Uniforms {
     pub _padding: [f32; 2],
 }
 
+unsafe impl Pod for Uniforms {}
+unsafe impl Zeroable for Uniforms {}
+
 /// Glyph atlas manager for storing and managing glyph bitmaps
 pub struct GlyphAtlas {
     texture: Texture,
+    sampler: Sampler,
     width: u32,
     height: u32,
     slots: HashMap<GlyphKey, AtlasSlot>,
@@ -58,12 +63,24 @@ pub struct GlyphAtlas {
 }
 
 /// Key for identifying glyphs in the atlas
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GlyphKey {
     pub font_hash: u64,
     pub glyph_id: u32,
     pub size: u32,
     pub scale: f32,
+}
+
+impl Eq for GlyphKey {}
+
+impl std::hash::Hash for GlyphKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.font_hash.hash(state);
+        self.glyph_id.hash(state);
+        self.size.hash(state);
+        // Convert f32 to u32 for hashing
+        self.scale.to_bits().hash(state);
+    }
 }
 
 /// Atlas slot information
@@ -124,14 +141,14 @@ pub struct GlyphPlacement {
     pub font_key: GlyphKey,
 }
 
-impl<'a> GpuRenderer<'a> {
+impl GpuRenderer {
     /// Create a new GPU renderer
-    pub async fn new(window: &Window) -> Result<Self, TimeLoopError> {
+    pub async fn new(window: Window) -> Result<Self, TimeLoopError> {
         let size = window.inner_size();
         
         // Initialize wgpu
         let instance = Instance::new(InstanceDescriptor::default());
-        let surface = unsafe { instance.create_surface(&window) }?;
+        let surface = instance.create_surface(window).map_err(|e| TimeLoopError::GpuError(e.to_string()))?;
         
         let adapter = instance
             .request_adapter(&RequestAdapterOptions {
@@ -146,12 +163,13 @@ impl<'a> GpuRenderer<'a> {
             .request_device(
                 &DeviceDescriptor {
                     label: None,
-                    features: Features::empty(),
-                    limits: Limits::default(),
+                    required_features: Features::empty(),
+                    required_limits: Limits::default(),
                 },
                 None,
             )
-            .await?;
+            .await
+            .map_err(|e| TimeLoopError::GpuError(e.to_string()))?;
         
         let device = Arc::new(device);
         let queue = Arc::new(queue);
@@ -173,6 +191,7 @@ impl<'a> GpuRenderer<'a> {
             present_mode: surface_caps.present_modes[0],
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
+            desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &surface_config);
         
@@ -214,8 +233,6 @@ impl<'a> GpuRenderer<'a> {
             surface,
             surface_config,
             render_pipeline,
-            atlas_texture: glyph_atlas.texture.clone(),
-            atlas_sampler: glyph_atlas.sampler.clone(),
             instance_buffer,
             uniform_buffer,
             bind_group,
@@ -296,6 +313,7 @@ impl<'a> GpuRenderer<'a> {
                 module: &shader,
                 entry_point: "vs_main",
                 buffers: &vertex_buffer_layouts,
+                compilation_options: PipelineCompilationOptions::default(),
             },
             fragment: Some(FragmentState {
                 module: &shader,
@@ -305,6 +323,7 @@ impl<'a> GpuRenderer<'a> {
                     blend: Some(BlendState::ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
                 })],
+                compilation_options: PipelineCompilationOptions::default(),
             }),
             primitive: PrimitiveState {
                 topology: PrimitiveTopology::TriangleList,
@@ -454,9 +473,26 @@ impl<'a> GpuRenderer<'a> {
         );
         
         // Render
-        let output = self.surface.get_current_texture()?;
+        let output = self.surface.get_current_texture().map_err(|e| TimeLoopError::GpuError(e.to_string()))?;
         let view = output.texture.create_view(&TextureViewDescriptor::default());
         
+        // Unit quad vertices (hardcoded for now)
+        let quad_vertices = [
+            -0.5, -0.5,
+             0.5, -0.5,
+             0.5,  0.5,
+            -0.5, -0.5,
+             0.5,  0.5,
+            -0.5,  0.5,
+        ];
+        let quad_buffer = self.device.create_buffer(&BufferDescriptor {
+            label: Some("Quad Buffer"),
+            size: (quad_vertices.len() * std::mem::size_of::<f32>()) as u64,
+            usage: BufferUsages::VERTEX,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&quad_buffer, 0, bytemuck::cast_slice(&quad_vertices));
+
         let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("Text Render Encoder"),
         });
@@ -479,20 +515,6 @@ impl<'a> GpuRenderer<'a> {
             
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.bind_group, &[]);
-            
-            // Unit quad vertices (hardcoded for now)
-            let quad_vertices = [
-                -0.5, -0.5,
-                 0.5, -0.5,
-                 0.5,  0.5,
-                -0.5, -0.5,
-                 0.5,  0.5,
-                -0.5,  0.5,
-            ];
-            let quad_buffer = self.device.create_buffer_with_data(
-                bytemuck::cast_slice(&quad_vertices),
-                BufferUsages::VERTEX,
-            );
             render_pass.set_vertex_buffer(0, quad_buffer.slice(..));
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             
@@ -548,6 +570,7 @@ impl GlyphAtlas {
         
         Ok(Self {
             texture,
+            sampler,
             width,
             height,
             slots: HashMap::new(),
@@ -568,7 +591,7 @@ impl GlyphAtlas {
     }
     
     /// Add a glyph to the atlas
-    pub fn add_glyph(&mut self, device: &Device, queue: &Queue, key: &GlyphKey) -> Result<(), TimeLoopError> {
+    pub fn add_glyph(&mut self, _device: &Device, queue: &Queue, key: &GlyphKey) -> Result<(), TimeLoopError> {
         // Rasterize the glyph using FreeType
         let rasterized = self.rasterizer.rasterize_glyph(
             &format!("{:x}", key.font_hash),
@@ -596,6 +619,7 @@ impl GlyphAtlas {
                     texture: &self.texture,
                     mip_level: 0,
                     origin: Origin3d { x: rect.x, y: rect.y, z: 0 },
+                    aspect: TextureAspect::All,
                 },
                 &rasterized.pixels,
                 ImageDataLayout {
@@ -751,7 +775,7 @@ impl GlyphRasterizer {
 }
 
 #[derive(Debug, Clone)]
-struct AtlasRect {
+pub struct AtlasRect {
     x: u32,
     y: u32,
     width: u32,

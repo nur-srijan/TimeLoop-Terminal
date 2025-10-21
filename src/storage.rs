@@ -390,10 +390,10 @@ impl Storage {
     {
         if let Some(inner) = &self.inner {
             let guard = inner.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-            Ok(f(&*guard))
+            Ok(f(&guard))
         } else {
             let guard = GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-            Ok(f(&*guard))
+            Ok(f(&guard))
         }
     }
 
@@ -405,10 +405,10 @@ impl Storage {
         self.increment_pending_writes();
         let result = if let Some(inner) = &self.inner {
             let mut guard = inner.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-            Ok(f(&mut *guard))
+            Ok(f(&mut guard))
         } else {
             let mut guard = GLOBAL_STORAGE.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-            Ok(f(&mut *guard))
+            Ok(f(&mut guard))
         };
         self.decrement_pending_writes();
         result
@@ -417,19 +417,17 @@ impl Storage {
     pub fn store_event(&self, event: &Event) -> crate::Result<()> {
         // Always update in-memory storage
         self.with_write(|guard| {
-            let session_events = guard.events.entry(event.session_id.clone()).or_insert_with(Vec::new);
+            let session_events = guard.events.entry(event.session_id.clone()).or_default();
             session_events.push(event.clone());
         })?;
         // If append-only logging is enabled, append event to the log; otherwise
         // persist the full state as before.
         if self.append_only {
             let _ = self.append_event_to_log(event);
-        } else {
-            if let Some(path) = &self.persistence_path {
-                let _ = Self::save_to_path(path, self);
-            } else if self.inner.is_none() {
-                let _ = Self::save_to_disk();
-            }
+        } else if let Some(path) = &self.persistence_path {
+            let _ = Self::save_to_path(path, self);
+        } else if self.inner.is_none() {
+            let _ = Self::save_to_disk();
         }
         Ok(())
     }
@@ -714,7 +712,7 @@ impl Storage {
                         }
                         // sort by modified time desc (newest first)
                         rots.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
-                        if rots.len() > retention as usize {
+                        if rots.len() > retention {
                             for (_, path) in rots.iter().skip(retention) {
                                 let _ = std::fs::remove_file(path);
                             }
@@ -802,7 +800,7 @@ impl Storage {
                                             }
                                         }
                                         rots.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
-                                        if rots.len() > retention as usize {
+                                        if rots.len() > retention {
                                             for (_, path) in rots.iter().skip(retention) {
                                                 let _ = std::fs::remove_file(path);
                                             }
@@ -1038,7 +1036,7 @@ impl Storage {
         }
     }
 
-    fn events_log_for(path: &PathBuf, format: PersistenceFormat) -> PathBuf {
+    fn events_log_for(path: &std::path::Path, format: PersistenceFormat) -> PathBuf {
         let fname = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "state".to_string());
         match format {
             PersistenceFormat::Json => path.with_file_name(format!("{}.events.jsonl", fname)),
@@ -1080,12 +1078,12 @@ impl Storage {
                         let plain = Self::try_decrypt(key, &nonce, &ciphertext).map_err(|_| crate::error::TimeLoopError::Storage("decryption failed".to_string()))?;
                         let event: Event = serde_json::from_slice(&plain)?;
                         // insert event
-                        self.with_write(|g| { g.events.entry(event.session_id.clone()).or_insert_with(Vec::new).push(event); })?;
+                        self.with_write(|g| { g.events.entry(event.session_id.clone()).or_default().push(event); })?;
                     }
                 } else {
                     let event: Event = serde_json::from_str(&l)?;
                     // insert event
-                    self.with_write(|g| { g.events.entry(event.session_id.clone()).or_insert_with(Vec::new).push(event); })?;
+                    self.with_write(|g| { g.events.entry(event.session_id.clone()).or_default().push(event); })?;
                 }
             }
         } else {
@@ -1093,7 +1091,7 @@ impl Storage {
             let mut file = std::fs::File::open(&path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             loop {
                 let mut len_buf = [0u8; 4];
-                if let Err(_) = file.read_exact(&mut len_buf) { break; }
+                if file.read_exact(&mut len_buf).is_err() { break; }
                 let len = u32::from_le_bytes(len_buf) as usize;
                 let mut buf = vec![0u8; len];
                 file.read_exact(&mut buf).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
@@ -1102,12 +1100,12 @@ impl Storage {
                     if let Some(key) = &self.encryption_key {
                         let plain = Self::try_decrypt(key, &wrapper.nonce, &wrapper.ciphertext).map_err(|_| crate::error::TimeLoopError::Storage("decryption failed".to_string()))?;
                         let event: Event = serde_cbor::from_slice(&plain)?;
-                        self.with_write(|g| { g.events.entry(event.session_id.clone()).or_insert_with(Vec::new).push(event); })?;
+                        self.with_write(|g| { g.events.entry(event.session_id.clone()).or_default().push(event); })?;
                     }
                 } else {
                     // treat as raw CBOR Event
                     let event: Event = serde_cbor::from_slice(&buf)?;
-                    self.with_write(|g| { g.events.entry(event.session_id.clone()).or_insert_with(Vec::new).push(event); })?;
+                    self.with_write(|g| { g.events.entry(event.session_id.clone()).or_default().push(event); })?;
                 }
             }
         }
@@ -1180,7 +1178,7 @@ impl Default for CompactionPolicy {
 }
 
 fn global_persistence_format() -> PersistenceFormat {
-    GLOBAL_PERSISTENCE_FORMAT.get_or_init(|| RwLock::new(PersistenceFormat::Json)).read().unwrap().clone()
+    *GLOBAL_PERSISTENCE_FORMAT.get_or_init(|| RwLock::new(PersistenceFormat::Json)).read().unwrap()
 }
 
 fn global_append_only() -> bool {
@@ -1188,7 +1186,7 @@ fn global_append_only() -> bool {
 }
 
 fn global_compaction_policy() -> CompactionPolicy {
-    GLOBAL_COMPACTION_POLICY.get_or_init(|| RwLock::new(CompactionPolicy::default())).read().unwrap().clone()
+    *GLOBAL_COMPACTION_POLICY.get_or_init(|| RwLock::new(CompactionPolicy::default())).read().unwrap()
 }
 
 fn global_argon2_config() -> Argon2Config {

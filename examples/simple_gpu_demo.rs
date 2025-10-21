@@ -1,5 +1,5 @@
 use timeloop_terminal::{SessionManager, EventRecorder, Storage};
-use std::io::{self, Write};
+use std::io;
 
 /// Simple demonstration of the GPU rendering concepts
 /// This example shows how the GPU rendering system would integrate
@@ -16,7 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Created session: {}", session_id);
     
     // Create event recorder
-    let event_recorder = EventRecorder::with_storage(&session_id, session_manager.storage.clone());
+    let storage = Storage::new()?;
+    let mut event_recorder = EventRecorder::with_storage(&session_id, storage);
     
     // Simulate terminal content that would be rendered with GPU
     let terminal_content = vec![
@@ -60,14 +61,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Simulate recording events for each line
     for (i, line) in terminal_content.iter().enumerate() {
         // Record the text as a command
-        if let Ok(mut guard) = event_recorder.lock() {
-            let _ = guard.record_command(
-                &format!("echo '{}'", line),
-                line,
-                0,
-                &std::env::current_dir()?.to_string_lossy()
-            );
-        }
+        let _ = event_recorder.record_command(
+            &format!("echo '{}'", line),
+            line,
+            0,
+            &std::env::current_dir()?.to_string_lossy()
+        );
         
         // Simulate GPU rendering
         println!("[GPU Render] Line {}: {}", i + 1, line);
@@ -106,9 +105,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n=== Session Summary ===");
         println!("Session: {}", summary.session_id);
         println!("Duration: {}s", summary.duration.num_seconds());
-        println!("Commands: {}", summary.commands);
-        println!("Key presses: {}", summary.key_presses);
-        println!("File changes: {}", summary.file_changes);
+        println!("Commands: {}", summary.commands_executed);
+        println!("Files modified: {}", summary.files_modified);
+        println!("File changes: {}", summary.files_modified);
     }
     
     println!("\n=== GPU Rendering Features Demonstrated ===");
