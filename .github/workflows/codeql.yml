@@ -48,9 +48,18 @@ jobs:
         uses: github/codeql-action/init@v3
         with:
           languages: rust
-          build-mode: none
+          build-mode: ${{ matrix.build-mode }}
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
         with:
           category: "/language:rust"
+          output: "codeql-rust-results.sarif"
+      - name: Upload CodeQL results
+        uses: actions/upload-artifact@v3
+        with:
+          name: codeql-rust-results.sarif
+      - name: Perform CodeQL Analysis for actions
+        uses: github/codeql-action/analyze@v3
+        with: 
+          category: "/language:actions"

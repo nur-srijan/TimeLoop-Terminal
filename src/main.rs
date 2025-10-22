@@ -157,9 +157,12 @@ enum Commands {
     Summarize {
         /// Session ID to summarize
         session_id: String,
-        /// Model name (default: openrouter/auto)
+        /// Model name (default: auto-detect based on API provider)
         #[arg(long)]
         model: Option<String>,
+        /// API provider to use (openai, openrouter, or auto-detect)
+        #[arg(long)]
+        provider: Option<String>,
     },
     /// Compact storage
     Compact {
@@ -248,8 +251,8 @@ async fn main() -> Result<(), TimeLoopError> {
         Some(Commands::Import { input }) => {
             import_session(input).await?;
         }
-        Some(Commands::Summarize { session_id, model }) => {
-            run_ai_summarize(session_id, model.as_deref()).await?;
+        Some(Commands::Summarize { session_id, model, provider }) => {
+            run_ai_summarize(session_id, model.as_deref(), provider.as_deref()).await?;
         }
         Some(Commands::Compact { file }) => {
             // If a file was provided, compact that specific storage instance; otherwise compact global storage.
@@ -465,15 +468,26 @@ async fn import_session(input: &str) -> Result<(), TimeLoopError> {
 }
 
 #[cfg(feature = "ai")]
-async fn run_ai_summarize(session_id: &str, model: Option<&str>) -> Result<(), TimeLoopError> {
-    let model = model.unwrap_or("openrouter/auto");
-    let summary = timeloop_terminal::ai::summarize_session(session_id, model).await?;
+async fn run_ai_summarize(session_id: &str, model: Option<&str>, provider: Option<&str>) -> Result<(), TimeLoopError> {
+    use timeloop_terminal::ai::ApiProvider;
+    
+    let api_provider = match provider {
+        Some("openai") => Some(ApiProvider::OpenAI),
+        Some("openrouter") => Some(ApiProvider::OpenRouter),
+        Some("auto") | None => None, // Auto-detect
+        Some(other) => {
+            eprintln!("Unknown API provider: {}. Use 'openai', 'openrouter', or 'auto'", other);
+            return Err(TimeLoopError::Configuration(format!("Unknown API provider: {}", other)));
+        }
+    };
+    
+    let summary = timeloop_terminal::ai::summarize_session(session_id, model, api_provider).await?;
     println!("{}", summary);
     Ok(())
 }
 
 #[cfg(not(feature = "ai"))]
-async fn run_ai_summarize(_session_id: &str, _model: Option<&str>) -> Result<(), TimeLoopError> {
+async fn run_ai_summarize(_session_id: &str, _model: Option<&str>, _provider: Option<&str>) -> Result<(), TimeLoopError> {
     println!("AI feature not enabled. Rebuild with: cargo run --features ai");
     Ok(())
 }
