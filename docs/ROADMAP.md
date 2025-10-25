@@ -18,13 +18,18 @@ Immediate enhancements (done in current patch)
 - Fixed initial terminal raw mode imports and ensured EventRecorder is always called behind a Mutex guard.
 - GUI binary gated behind the `gui` feature to make the optional dependency truly optional.
 - Linted test warnings (unused variables/imports) and fixed them.
+- Add `cargo clippy` as part of CI and fix all warnings to keep code quality high.
+- Append-only event log compaction: the storage layer now supports an opt-in append-only event log and a `Storage::compact()` operation which writes a full snapshot atomically and rotates/truncates event logs.
+- Rotation and retention policies: configure maximum append-log size, maximum event count, retention count for rotated logs, and an interval for background compaction.
+- Background compaction: opt-in background thread that will rotate logs based on configured thresholds and perform best-effort retention pruning.
+- CLI flags added to tune Argon2 (memory/iterations/parallelism) and compaction/rotation thresholds (max-log-size, max-events, retention-count, compaction-interval).
+
 
 Short-term (next 1–2 weeks)
 - Add `Storage::backup(path)` and `Storage::restore(path)` helpers to manage snapshots.
 - Implement a configurable autosave policy (e.g. time-based debounce or write coalescing) to avoid too-frequent disk writes.
 - Add an explicit `Storage::open_or_create(path)` that validates file permissions and migration paths.
 - Add an integration test that simulates concurrent access (two instances writing to different files) and verify isolation.
-- Add `cargo clippy` as part of CI and fix all warnings to keep code quality high.
 
 Medium-term (1–3 months)
 - Provide optional write-ahead logging (WAL) for better durability and crash recovery for the global store.
@@ -44,12 +49,6 @@ Caveats and considerations
 - Concurrency: multiple processes writing to the same state file can cause race conditions. Prefer per-instance files or a single writer service.
 - Data size: session recording can grow large for long sessions. Add compression and retention policies.
 - Privacy: user command output may contain secrets. Provide opt-in redaction options and encrypted storage.
-
-New in this branch: compaction, rotation and CLI knobs
-- Append-only event log compaction: the storage layer now supports an opt-in append-only event log and a `Storage::compact()` operation which writes a full snapshot atomically and rotates/truncates event logs.
-- Rotation and retention policies: configure maximum append-log size, maximum event count, retention count for rotated logs, and an interval for background compaction.
-- Background compaction: opt-in background thread that will rotate logs based on configured thresholds and perform best-effort retention pruning.
-- CLI flags added to tune Argon2 (memory/iterations/parallelism) and compaction/rotation thresholds (max-log-size, max-events, retention-count, compaction-interval).
 
 Usage examples:
 
