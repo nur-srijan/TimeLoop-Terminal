@@ -155,12 +155,29 @@ impl FileWatcher {
     }
 
     async fn process_file_event(&mut self, event: notify::Event) -> crate::Result<()> {
+        if let notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) = event.kind {
+            // Handle rename: expect 2 paths [old, new]
+            if event.paths.len() == 2 {
+                let old_path = event.paths[0].to_string_lossy().to_string();
+                let new_path = event.paths[1].to_string_lossy().to_string();
+                let change = FileChangeType::Renamed { old_path };
+                let callback = self.file_change_callback.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = callback.lock().await(&new_path, change) {
+                        eprintln!("Error in file change callback: {}", e);
+                    }
+                });
+                return Ok(());
+            }
+        }
+
         for path in event.paths {
             let change_type = match event.kind {
                 notify::EventKind::Create(_) => FileChangeType::Created,
                 notify::EventKind::Remove(_) => FileChangeType::Deleted,
                 notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
-                    // For rename events, capture rename change
+                    // For rename events, if not 2 paths, we can't do much or treat as modify/create
+                    // Fallback if we only got 1 path for some reason (rare for Rename)
                     FileChangeType::Renamed { old_path: String::new() }
                 }
                 notify::EventKind::Modify(_) => FileChangeType::Modified,
@@ -169,19 +186,9 @@ impl FileWatcher {
             
             let callback = self.file_change_callback.clone();
             let path_str = path.to_string_lossy().to_string();
-            let event_kind = event.kind;
+
             tokio::spawn(async move {
-                let change = match event_kind {
-                    notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
-                        // For rename, try to read old path from first element if present
-                        // Since we're inside spawned task, we only have current path; this is a best-effort placeholder
-                        if let FileChangeType::Renamed { .. } = &change_type {
-                            FileChangeType::Renamed { old_path: String::from("") }
-                        } else { change_type }
-                    }
-                    _ => change_type,
-                };
-                if let Err(e) = callback.lock().await(&path_str, change) {
+                if let Err(e) = callback.lock().await(&path_str, change_type) {
                     eprintln!("Error in file change callback: {}", e);
                 }
             });
