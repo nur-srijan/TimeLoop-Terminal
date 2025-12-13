@@ -3,6 +3,9 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use crate::storage::Storage;
 use regex::Regex;
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum EventType {
@@ -207,12 +210,20 @@ impl EventRecorder {
 
     pub fn record_file_change(&mut self, path: &str, change_type: FileChangeType) -> crate::Result<()> {
         self.sequence_counter += 1;
+
+        // Compute content hash if the file exists and isn't deleted
+        let content_hash = if change_type != FileChangeType::Deleted {
+            self.compute_file_hash(path)
+        } else {
+            None
+        };
+
         let event = Event::new(
             &self.session_id,
             EventType::FileChange {
                 path: path.to_string(),
                 change_type,
-                content_hash: None, // TODO: Implement content hashing
+                content_hash,
                 timestamp: Utc::now(),
             },
             self.sequence_counter,
@@ -271,6 +282,23 @@ impl EventRecorder {
         }
         s
     }
+
+    fn compute_file_hash(&self, path: &str) -> Option<String> {
+        let path = Path::new(path);
+        if !path.exists() {
+            return None;
+        }
+
+        match fs::read(path) {
+            Ok(content) => {
+                let mut hasher = Sha256::new();
+                hasher.update(&content);
+                let result = hasher.finalize();
+                Some(format!("{:x}", result))
+            }
+            Err(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -292,5 +320,37 @@ mod tests {
             assert!(!output.contains("supersecret"));
             assert!(!output.contains("abc123"));
         } else { panic!("expected command event"); }
+    }
+
+    #[test]
+    fn test_file_hashing() {
+        use std::io::Write;
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = tmp_dir.path().join("test_file.txt");
+        let db_path = tmp_dir.path().join("events_hashing.db");
+
+        // Create a test file
+        let mut file = fs::File::create(&file_path).unwrap();
+        file.write_all(b"Hello world").unwrap();
+
+        let storage = crate::storage::Storage::with_path(db_path.to_str().unwrap()).unwrap();
+        let mut recorder = EventRecorder::with_storage("hash-session", storage);
+
+        recorder.record_file_change(
+            file_path.to_str().unwrap(),
+            FileChangeType::Modified
+        ).unwrap();
+
+        let events = recorder.get_events_for_session("hash-session").unwrap();
+        assert_eq!(events.len(), 1);
+
+        if let EventType::FileChange { content_hash, .. } = &events[0].event_type {
+            assert!(content_hash.is_some());
+            // SHA256 of "Hello world"
+            assert_eq!(content_hash.as_ref().unwrap(), "64ec88ca00b268e5ba1a35678a1b5316d212f4f366b2477232534a8aeca37f3c");
+        } else {
+            panic!("expected file change event");
+        }
     }
 }
