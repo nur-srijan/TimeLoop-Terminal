@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum EventType {
