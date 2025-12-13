@@ -1,14 +1,10 @@
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use timeloop_terminal::{
-    session::SessionManager,
-    terminal::TerminalEmulator,
-    events::EventRecorder,
-    replay::ReplayEngine,
-    error::TimeLoopError,
-    storage::Storage,
+    error::TimeLoopError, events::EventRecorder, replay::ReplayEngine, session::SessionManager,
+    storage::Storage, terminal::TerminalEmulator,
 };
 use tracing::info;
-use chrono::Utc;
 
 #[derive(Parser)]
 #[command(name = "timeloop")]
@@ -173,37 +169,67 @@ enum Commands {
 async fn main() -> Result<(), TimeLoopError> {
     // Initialize logging
     tracing_subscriber::fmt::init();
-    
+
     info!("🚀 Starting TimeLoop Terminal...");
-    
+
     let cli = Cli::parse();
-    
+
     // Apply persistence-related global flags early so Storage::new() uses them
     if let Some(fmt) = &cli.persistence_format {
         match fmt.as_str() {
-            "json" => timeloop_terminal::storage::Storage::set_global_persistence_format(timeloop_terminal::storage::PersistenceFormat::Json),
-            "cbor" => timeloop_terminal::storage::Storage::set_global_persistence_format(timeloop_terminal::storage::PersistenceFormat::Cbor),
-            other => return Err(TimeLoopError::Configuration(format!("Unknown persistence format: {}", other))),
+            "json" => timeloop_terminal::storage::Storage::set_global_persistence_format(
+                timeloop_terminal::storage::PersistenceFormat::Json,
+            ),
+            "cbor" => timeloop_terminal::storage::Storage::set_global_persistence_format(
+                timeloop_terminal::storage::PersistenceFormat::Cbor,
+            ),
+            other => {
+                return Err(TimeLoopError::Configuration(format!(
+                    "Unknown persistence format: {}",
+                    other
+                )))
+            }
         }
     }
     timeloop_terminal::storage::Storage::set_global_append_only(cli.append_events);
 
     // Wire Argon2 CLI params into global config if provided
-    if cli.argon2_memory_kib.is_some() || cli.argon2_iterations.is_some() || cli.argon2_parallelism.is_some() {
+    if cli.argon2_memory_kib.is_some()
+        || cli.argon2_iterations.is_some()
+        || cli.argon2_parallelism.is_some()
+    {
         let mut cfg = timeloop_terminal::storage::Argon2Config::default();
-        if let Some(m) = cli.argon2_memory_kib { cfg.memory_kib = m; }
-        if let Some(i) = cli.argon2_iterations { cfg.iterations = i; }
-        if let Some(p) = cli.argon2_parallelism { cfg.parallelism = p; }
+        if let Some(m) = cli.argon2_memory_kib {
+            cfg.memory_kib = m;
+        }
+        if let Some(i) = cli.argon2_iterations {
+            cfg.iterations = i;
+        }
+        if let Some(p) = cli.argon2_parallelism {
+            cfg.parallelism = p;
+        }
         timeloop_terminal::storage::Storage::set_global_argon2_config(cfg);
     }
 
     // Wire compaction/rotation CLI flags into global compaction policy
-    if cli.max_log_size_mb.is_some() || cli.max_events.is_some() || cli.retention_count.is_some() || cli.compaction_interval_secs.is_some() {
+    if cli.max_log_size_mb.is_some()
+        || cli.max_events.is_some()
+        || cli.retention_count.is_some()
+        || cli.compaction_interval_secs.is_some()
+    {
         let mut pol = timeloop_terminal::storage::CompactionPolicy::default();
-        if let Some(mb) = cli.max_log_size_mb { pol.max_log_size_bytes = Some(mb * 1024 * 1024); }
-        if let Some(me) = cli.max_events { pol.max_events = Some(me); }
-        if let Some(rc) = cli.retention_count { pol.retention_count = rc; }
-        if let Some(ci) = cli.compaction_interval_secs { pol.compaction_interval_secs = Some(ci); }
+        if let Some(mb) = cli.max_log_size_mb {
+            pol.max_log_size_bytes = Some(mb * 1024 * 1024);
+        }
+        if let Some(me) = cli.max_events {
+            pol.max_events = Some(me);
+        }
+        if let Some(rc) = cli.retention_count {
+            pol.retention_count = rc;
+        }
+        if let Some(ci) = cli.compaction_interval_secs {
+            pol.compaction_interval_secs = Some(ci);
+        }
         timeloop_terminal::storage::Storage::set_global_compaction_policy(pol);
     }
 
@@ -218,16 +244,29 @@ async fn main() -> Result<(), TimeLoopError> {
         Some(Commands::Replay { session_id, speed }) => {
             replay_session(session_id, *speed).await?;
         }
-        Some(Commands::ReplayRange { session_id, start, end, speed }) => {
+        Some(Commands::ReplayRange {
+            session_id,
+            start,
+            end,
+            speed,
+        }) => {
             replay_session_range(session_id, start, end, *speed).await?;
         }
-        Some(Commands::Branch { session_id, name, event_id, at }) => {
+        Some(Commands::Branch {
+            session_id,
+            name,
+            event_id,
+            at,
+        }) => {
             create_branch(session_id, name, event_id.as_deref(), at.as_deref()).await?;
         }
         Some(Commands::Branches { session_id }) => {
             list_branches(session_id).await?;
         }
-        Some(Commands::Merge { branch_id, target_session_id }) => {
+        Some(Commands::Merge {
+            branch_id,
+            target_session_id,
+        }) => {
             merge_branch(branch_id, target_session_id).await?;
         }
         Some(Commands::DeleteBranch { branch_id }) => {
@@ -269,59 +308,65 @@ async fn main() -> Result<(), TimeLoopError> {
             start_session(session_name).await?;
         }
     }
-    
+
     Ok(())
 }
 
 async fn start_session(name: &str) -> Result<(), TimeLoopError> {
     info!("🎬 Starting new session: {}", name);
-    
+
     let _storage = Storage::new()?;
 
     let mut session_manager = SessionManager::new()?;
     let session_id = session_manager.create_session(name)?;
-    
+
     let event_recorder = EventRecorder::new(&session_id)?;
     let mut terminal = TerminalEmulator::new(event_recorder)?;
-    
+
     info!("📝 Session {} started with ID: {}", name, session_id);
-    
+
     // Start the terminal emulator
     terminal.run().await?;
-    
+
     Ok(())
 }
 
 async fn list_sessions() -> Result<(), TimeLoopError> {
     info!("📋 Listing all sessions...");
-    
+
     let session_manager = SessionManager::new()?;
     let sessions = session_manager.list_sessions()?;
-    
+
     println!("🕰️  TimeLoop Sessions:");
     println!("{}", "─".repeat(50));
-    
+
     for session in sessions {
-        println!("📁 {} - {} ({})", 
-            session.id, 
-            session.name, 
+        println!(
+            "📁 {} - {} ({})",
+            session.id,
+            session.name,
             session.created_at.format("%Y-%m-%d %H:%M:%S")
         );
     }
-    
+
     Ok(())
 }
 
 async fn replay_session(session_id: &str, speed: f32) -> Result<(), TimeLoopError> {
     info!("🎥 Replaying session: {} at {}x speed", session_id, speed);
-    
+
     let replay_engine = ReplayEngine::new(session_id)?;
     replay_engine.replay(speed).await?;
-    
+
     Ok(())
 }
 
-async fn replay_session_range(session_id: &str, start: &str, end: &str, speed: f32) -> Result<(), TimeLoopError> {
+async fn replay_session_range(
+    session_id: &str,
+    start: &str,
+    end: &str,
+    speed: f32,
+) -> Result<(), TimeLoopError> {
     let replay_engine = ReplayEngine::new(session_id)?;
     let start_ts = chrono::DateTime::parse_from_rfc3339(start)
         .map_err(|e| TimeLoopError::Replay(format!("Invalid start time: {}", e)))?
@@ -333,7 +378,12 @@ async fn replay_session_range(session_id: &str, start: &str, end: &str, speed: f
     Ok(())
 }
 
-async fn create_branch(session_id: &str, name: &str, event_id: Option<&str>, at: Option<&str>) -> Result<(), TimeLoopError> {
+async fn create_branch(
+    session_id: &str,
+    name: &str,
+    event_id: Option<&str>,
+    at: Option<&str>,
+) -> Result<(), TimeLoopError> {
     info!("🧬 Creating branch '{}' from session: {}", name, session_id);
 
     // Create a branch session entry
@@ -364,7 +414,8 @@ async fn create_branch(session_id: &str, name: &str, event_id: Option<&str>, at:
     };
 
     let mut branch_manager = timeloop_terminal::branch::BranchManager::new()?;
-    let timeline_branch_id = branch_manager.create_branch(session_id, name, &branch_point_id, None)?;
+    let timeline_branch_id =
+        branch_manager.create_branch(session_id, name, &branch_point_id, None)?;
 
     println!(
         "✅ Created branch '{}' with session ID: {} and timeline ID: {}",
@@ -387,7 +438,10 @@ async fn list_branches(session_id: &str) -> Result<(), TimeLoopError> {
 async fn merge_branch(branch_id: &str, target_session_id: &str) -> Result<(), TimeLoopError> {
     let mut branch_manager = timeloop_terminal::branch::BranchManager::new()?;
     branch_manager.merge_branch(branch_id, target_session_id)?;
-    println!("Merged branch {} into session {}", branch_id, target_session_id);
+    println!(
+        "Merged branch {} into session {}",
+        branch_id, target_session_id
+    );
     Ok(())
 }
 
@@ -400,19 +454,19 @@ async fn delete_branch(branch_id: &str) -> Result<(), TimeLoopError> {
 
 async fn show_summary(session_id: &str) -> Result<(), TimeLoopError> {
     info!("📊 Showing summary for session: {}", session_id);
-    
+
     let session_manager = SessionManager::new()?;
     let summary = session_manager.get_session_summary(session_id)?;
-    
+
     println!("📈 Session Summary for: {}", session_id);
     println!("{}", "─".repeat(50));
     println!("⏱️  Duration: {}", summary.duration);
     println!("⌨️  Commands executed: {}", summary.commands_executed);
     println!("📁 Files modified: {}", summary.files_modified);
     println!("🎯 Last command: {}", summary.last_command);
-    
+
     Ok(())
-} 
+}
 
 async fn export_session(session_id: &str, output: &str) -> Result<(), TimeLoopError> {
     let storage = Storage::new()?;
@@ -446,13 +500,22 @@ async fn show_event_timeline(session_id: &str) -> Result<(), TimeLoopError> {
     events.sort_by_key(|e| e.sequence_number);
     println!("Event timeline for session {}:", session_id);
     for e in events {
-        println!("{} [{}] seq={}", e.timestamp.to_rfc3339(), match &e.event_type {
-            timeloop_terminal::EventType::KeyPress { key, .. } => format!("KeyPress {}", key),
-            timeloop_terminal::EventType::Command { command, .. } => format!("Command {}", command),
-            timeloop_terminal::EventType::FileChange { path, change_type, .. } => format!("FileChange {:?} {}", change_type, path),
-            timeloop_terminal::EventType::TerminalState { .. } => "TerminalState".to_string(),
-            timeloop_terminal::EventType::SessionMetadata { name, .. } => format!("SessionMetadata {}", name),
-        }, e.sequence_number);
+        println!(
+            "{} [{}] seq={}",
+            e.timestamp.to_rfc3339(),
+            match &e.event_type {
+                timeloop_terminal::EventType::KeyPress { key, .. } => format!("KeyPress {}", key),
+                timeloop_terminal::EventType::Command { command, .. } =>
+                    format!("Command {}", command),
+                timeloop_terminal::EventType::FileChange {
+                    path, change_type, ..
+                } => format!("FileChange {:?} {}", change_type, path),
+                timeloop_terminal::EventType::TerminalState { .. } => "TerminalState".to_string(),
+                timeloop_terminal::EventType::SessionMetadata { name, .. } =>
+                    format!("SessionMetadata {}", name),
+            },
+            e.sequence_number
+        );
     }
     Ok(())
 }

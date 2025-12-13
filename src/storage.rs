@@ -1,33 +1,34 @@
-use std::collections::HashMap;
-use std::fs;
-use std::io::{Write as _, BufRead, Read, Seek};
-use std::sync::{RwLock, Arc};
-use std::thread;
-use std::time::Duration;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::path::PathBuf;
-use chrono::{DateTime, Utc};
-use once_cell::sync::{Lazy, OnceCell};
-use serde::{Deserialize, Serialize};
-use crate::Event;
-use crate::session::Session;
 use crate::branch::TimelineBranch;
-use base64;
-use chacha20poly1305;
+use crate::session::Session;
+use crate::Event;
 use argon2::Argon2;
-use zeroize::Zeroize;
+use base64;
 use base64::engine::general_purpose;
 use base64::Engine as _;
+use chacha20poly1305;
+use chrono::{DateTime, Utc};
+use once_cell::sync::{Lazy, OnceCell};
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::io::{BufRead, Read, Seek, Write as _};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
+use std::thread;
+use std::time::Duration;
+use zeroize::Zeroize;
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct StorageInner {
-    events: HashMap<String, Vec<Event>>,      // session_id -> events
-    sessions: HashMap<String, Session>,       // session_id -> session
-    branches: HashMap<String, TimelineBranch>,// branch_id -> branch
+    events: HashMap<String, Vec<Event>>,       // session_id -> events
+    sessions: HashMap<String, Session>,        // session_id -> session
+    branches: HashMap<String, TimelineBranch>, // branch_id -> branch
 }
 
-static GLOBAL_STORAGE: Lazy<RwLock<StorageInner>> = Lazy::new(|| RwLock::new(StorageInner::default()));
+static GLOBAL_STORAGE: Lazy<RwLock<StorageInner>> =
+    Lazy::new(|| RwLock::new(StorageInner::default()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Argon2Config {
@@ -108,7 +109,9 @@ impl Storage {
     }
 
     /// Get the per-instance retention_count
-    pub fn retention_count(&self) -> usize { self.retention_count }
+    pub fn retention_count(&self) -> usize {
+        self.retention_count
+    }
 
     pub fn new() -> crate::Result<Self> {
         // Best-effort load persisted state for the global storage
@@ -116,9 +119,24 @@ impl Storage {
         // adopt global config
         let fmt = global_persistence_format();
         let append = global_append_only();
-    // load global compaction defaults
-    let gp = global_compaction_policy();
-    let mut s = Self { inner: None, persistence_path: None, encryption_key: None, encryption_salt: None, argon2_config: None, persistence_format: fmt, append_only: append, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None };
+        // load global compaction defaults
+        let gp = global_compaction_policy();
+        let mut s = Self {
+            inner: None,
+            persistence_path: None,
+            encryption_key: None,
+            encryption_salt: None,
+            argon2_config: None,
+            persistence_format: fmt,
+            append_only: append,
+            events_log_path: None,
+            max_log_size_bytes: gp.max_log_size_bytes,
+            max_events: gp.max_events,
+            retention_count: gp.retention_count,
+            compaction_interval_secs: gp.compaction_interval_secs,
+            background_running: None,
+            background_handle: None,
+        };
         if append {
             // compute events log path for default global persistence file
             let p = Self::persistence_file();
@@ -135,7 +153,11 @@ impl Storage {
     // integration tests that need on-disk isolation.
     pub fn with_path(path: &str) -> crate::Result<Self> {
         // If file extension indicates .cbor or .bin treat it as CBOR, else JSON
-        let format = if path.ends_with(".cbor") || path.ends_with(".bin") { PersistenceFormat::Cbor } else { PersistenceFormat::Json };
+        let format = if path.ends_with(".cbor") || path.ends_with(".bin") {
+            PersistenceFormat::Cbor
+        } else {
+            PersistenceFormat::Json
+        };
         Self::with_path_and_format(path, format)
     }
 
@@ -146,12 +168,29 @@ impl Storage {
         let pb = if input_pb.is_absolute() {
             input_pb
         } else {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(input_pb)
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(input_pb)
         };
-    let inner = Arc::new(RwLock::new(StorageInner::default()));
-    
-    let gp = global_compaction_policy();
-    let mut storage = Self { inner: Some(inner.clone()), persistence_path: Some(pb.clone()), encryption_key: None, encryption_salt: None, argon2_config: None, persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None };
+        let inner = Arc::new(RwLock::new(StorageInner::default()));
+
+        let gp = global_compaction_policy();
+        let mut storage = Self {
+            inner: Some(inner.clone()),
+            persistence_path: Some(pb.clone()),
+            encryption_key: None,
+            encryption_salt: None,
+            argon2_config: None,
+            persistence_format: format,
+            append_only: false,
+            events_log_path: None,
+            max_log_size_bytes: gp.max_log_size_bytes,
+            max_events: gp.max_events,
+            retention_count: gp.retention_count,
+            compaction_interval_secs: gp.compaction_interval_secs,
+            background_running: None,
+            background_handle: None,
+        };
 
         // If the file exists, load it into the per-instance inner store
         if pb.exists() {
@@ -192,11 +231,20 @@ impl Storage {
     pub fn with_encryption(path: &str, passphrase: &str) -> crate::Result<Self> {
         let default_params = Argon2Config::default();
         // detect format from extension
-        let format = if path.ends_with(".cbor") || path.ends_with(".bin") { PersistenceFormat::Cbor } else { PersistenceFormat::Json };
+        let format = if path.ends_with(".cbor") || path.ends_with(".bin") {
+            PersistenceFormat::Cbor
+        } else {
+            PersistenceFormat::Json
+        };
         Self::with_encryption_with_params_and_format(path, passphrase, &default_params, format)
     }
 
-    pub fn with_encryption_with_params_and_format(path: &str, passphrase: &str, params: &Argon2Config, format: PersistenceFormat) -> crate::Result<Self> {
+    pub fn with_encryption_with_params_and_format(
+        path: &str,
+        passphrase: &str,
+        params: &Argon2Config,
+        format: PersistenceFormat,
+    ) -> crate::Result<Self> {
         // Reuse the earlier with_encryption_with_params body but set persistence_format
         let pb = PathBuf::from(path);
         let inner = Arc::new(RwLock::new(StorageInner::default()));
@@ -209,11 +257,20 @@ impl Storage {
                 if let Ok(wrapper_str) = std::string::String::from_utf8(bytes.clone()) {
                     if let Ok(wrapper) = serde_json::from_str::<EncryptedFile>(&wrapper_str) {
                         if let Ok(salt_bytes) = general_purpose::STANDARD.decode(&wrapper.salt) {
-                            let key = Self::derive_key_with_params(passphrase, &salt_bytes, Some(params));
-                            if let Ok(ciphertext) = general_purpose::STANDARD.decode(&wrapper.ciphertext) {
-                                if let Ok(nonce_bytes) = general_purpose::STANDARD.decode(&wrapper.nonce) {
-                                    if let Ok(plain) = Self::try_decrypt(&key, &nonce_bytes, &ciphertext) {
-                                        if let Ok(inner_data) = serde_json::from_slice::<StorageInner>(&plain) {
+                            let key =
+                                Self::derive_key_with_params(passphrase, &salt_bytes, Some(params));
+                            if let Ok(ciphertext) =
+                                general_purpose::STANDARD.decode(&wrapper.ciphertext)
+                            {
+                                if let Ok(nonce_bytes) =
+                                    general_purpose::STANDARD.decode(&wrapper.nonce)
+                                {
+                                    if let Ok(plain) =
+                                        Self::try_decrypt(&key, &nonce_bytes, &ciphertext)
+                                    {
+                                        if let Ok(inner_data) =
+                                            serde_json::from_slice::<StorageInner>(&plain)
+                                        {
                                             if let Ok(mut guard) = inner.write() {
                                                 *guard = inner_data;
                                             }
@@ -221,7 +278,10 @@ impl Storage {
                                             encryption_salt = Some(salt_bytes);
                                         }
                                     } else {
-                                        return Err(crate::error::TimeLoopError::Configuration("Unable to decrypt storage: invalid passphrase".to_string()));
+                                        return Err(crate::error::TimeLoopError::Configuration(
+                                            "Unable to decrypt storage: invalid passphrase"
+                                                .to_string(),
+                                        ));
                                     }
                                 }
                             }
@@ -233,8 +293,11 @@ impl Storage {
                 if encryption_key.is_none() {
                     if let Ok(wrapper_cbor) = serde_cbor::from_slice::<EncryptedFileCbor>(&bytes) {
                         let salt_bytes = wrapper_cbor.salt;
-                        let key = Self::derive_key_with_params(passphrase, &salt_bytes, Some(params));
-                        if let Ok(plain) = Self::try_decrypt(&key, &wrapper_cbor.nonce, &wrapper_cbor.ciphertext) {
+                        let key =
+                            Self::derive_key_with_params(passphrase, &salt_bytes, Some(params));
+                        if let Ok(plain) =
+                            Self::try_decrypt(&key, &wrapper_cbor.nonce, &wrapper_cbor.ciphertext)
+                        {
                             if let Ok(inner_data) = serde_cbor::from_slice::<StorageInner>(&plain) {
                                 if let Ok(mut guard) = inner.write() {
                                     *guard = inner_data;
@@ -243,7 +306,9 @@ impl Storage {
                                 encryption_salt = Some(salt_bytes);
                             }
                         } else {
-                            return Err(crate::error::TimeLoopError::Configuration("Unable to decrypt storage: invalid passphrase".to_string()));
+                            return Err(crate::error::TimeLoopError::Configuration(
+                                "Unable to decrypt storage: invalid passphrase".to_string(),
+                            ));
                         }
                     }
                 }
@@ -261,7 +326,22 @@ impl Storage {
         }
 
         let gp = global_compaction_policy();
-        Ok(Self { inner: Some(inner), persistence_path: Some(pb), encryption_key, encryption_salt, argon2_config: Some(params.clone()), persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None })
+        Ok(Self {
+            inner: Some(inner),
+            persistence_path: Some(pb),
+            encryption_key,
+            encryption_salt,
+            argon2_config: Some(params.clone()),
+            persistence_format: format,
+            append_only: false,
+            events_log_path: None,
+            max_log_size_bytes: gp.max_log_size_bytes,
+            max_events: gp.max_events,
+            retention_count: gp.retention_count,
+            compaction_interval_secs: gp.compaction_interval_secs,
+            background_running: None,
+            background_handle: None,
+        })
     }
 
     pub fn get_db_path() -> crate::Result<std::path::PathBuf> {
@@ -274,10 +354,14 @@ impl Storage {
         F: FnOnce(&StorageInner) -> R,
     {
         if let Some(inner) = &self.inner {
-            let guard = inner.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+            let guard = inner
+                .read()
+                .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
             Ok(f(&*guard))
         } else {
-            let guard = GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+            let guard = GLOBAL_STORAGE
+                .read()
+                .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
             Ok(f(&*guard))
         }
     }
@@ -288,10 +372,14 @@ impl Storage {
         F: FnOnce(&mut StorageInner) -> R,
     {
         if let Some(inner) = &self.inner {
-            let mut guard = inner.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+            let mut guard = inner
+                .write()
+                .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
             Ok(f(&mut *guard))
         } else {
-            let mut guard = GLOBAL_STORAGE.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+            let mut guard = GLOBAL_STORAGE
+                .write()
+                .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
             Ok(f(&mut *guard))
         }
     }
@@ -299,7 +387,10 @@ impl Storage {
     pub fn store_event(&self, event: &Event) -> crate::Result<()> {
         // Always update in-memory storage
         self.with_write(|guard| {
-            let session_events = guard.events.entry(event.session_id.clone()).or_insert_with(Vec::new);
+            let session_events = guard
+                .events
+                .entry(event.session_id.clone())
+                .or_insert_with(Vec::new);
             session_events.push(event.clone());
         })?;
         // If append-only logging is enabled, append event to the log; otherwise
@@ -320,9 +411,17 @@ impl Storage {
         self.with_read(|guard| guard.events.get(session_id).cloned().unwrap_or_default())
     }
 
-    pub fn get_events_in_range(&self, session_id: &str, start: DateTime<Utc>, end: DateTime<Utc>) -> crate::Result<Vec<Event>> {
+    pub fn get_events_in_range(
+        &self,
+        session_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> crate::Result<Vec<Event>> {
         let events = self.get_events_for_session(session_id)?;
-        let filtered: Vec<Event> = events.into_iter().filter(|e| e.timestamp >= start && e.timestamp <= end).collect();
+        let filtered: Vec<Event> = events
+            .into_iter()
+            .filter(|e| e.timestamp >= start && e.timestamp <= end)
+            .collect();
         Ok(filtered)
     }
 
@@ -421,17 +520,22 @@ impl Storage {
 
     // Simple JSON export/import for sessions
     pub fn export_session_to_file(&self, session_id: &str, path: &str) -> crate::Result<()> {
-        let session = self.get_session(session_id)?.ok_or_else(|| crate::error::TimeLoopError::SessionNotFound(session_id.to_string()))?;
+        let session = self
+            .get_session(session_id)?
+            .ok_or_else(|| crate::error::TimeLoopError::SessionNotFound(session_id.to_string()))?;
         let events = self.get_events_for_session(session_id)?;
         let bundle = SessionExport { session, events };
         let json = serde_json::to_string_pretty(&bundle)?;
-        let mut file = fs::File::create(path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-        file.write_all(json.as_bytes()).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        let mut file = fs::File::create(path)
+            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        file.write_all(json.as_bytes())
+            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         Ok(())
     }
 
     pub fn import_session_from_file(&self, path: &str) -> crate::Result<String> {
-        let data = fs::read_to_string(path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        let data = fs::read_to_string(path)
+            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         let bundle: SessionExport = serde_json::from_str(&data)?;
         let id = bundle.session.id.clone();
         self.store_session(&bundle.session)?;
@@ -453,25 +557,33 @@ impl Storage {
     // the same directory and then renames into place.
     fn atomic_write(path: &PathBuf, bytes: &[u8]) -> crate::Result<()> {
         // If path has no parent (e.g., filename in current dir) use current directory
-        let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+        let parent = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         let mut tmp = parent.join(".tmp_timeloop");
         // add a random suffix to avoid collisions
         let mut osrng = rand::rngs::OsRng;
         let suffix: u64 = osrng.next_u64();
         tmp = tmp.with_extension(format!("{}.tmp", suffix));
- 
-         // Write tmp file
-         fs::write(&tmp, bytes).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-         // Rename into place (atomic on most platforms when on same filesystem)
-         std::fs::rename(&tmp, path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-         Ok(())
-     }
+
+        // Write tmp file
+        fs::write(&tmp, bytes)
+            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        // Rename into place (atomic on most platforms when on same filesystem)
+        std::fs::rename(&tmp, path)
+            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        Ok(())
+    }
 
     fn save_to_disk() -> crate::Result<()> {
         let dir = Self::data_dir();
-        fs::create_dir_all(&dir).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        fs::create_dir_all(&dir)
+            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         let path = Self::persistence_file();
-        let guard = GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+        let guard = GLOBAL_STORAGE
+            .read()
+            .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
         let data = serde_json::to_string_pretty(&*guard)?;
         // atomic write
         Self::atomic_write(&path, data.as_bytes())?;
@@ -515,7 +627,13 @@ impl Storage {
                     if let Ok(file) = std::fs::File::open(&log_path) {
                         let reader = std::io::BufReader::new(file);
                         let mut cnt = 0usize;
-                        for _ in reader.lines() { cnt += 1; if cnt > max_ev { should_rotate = true; break; } }
+                        for _ in reader.lines() {
+                            cnt += 1;
+                            if cnt > max_ev {
+                                should_rotate = true;
+                                break;
+                            }
+                        }
                     }
                 } else {
                     // For CBOR count records by iterating length-prefixed entries
@@ -523,11 +641,18 @@ impl Storage {
                         let mut cnt = 0usize;
                         loop {
                             let mut len_buf = [0u8; 4];
-                            if file.read_exact(&mut len_buf).is_err() { break; }
+                            if file.read_exact(&mut len_buf).is_err() {
+                                break;
+                            }
                             let len = u32::from_le_bytes(len_buf) as usize;
-                            if file.seek(std::io::SeekFrom::Current(len as i64)).is_err() { break; }
+                            if file.seek(std::io::SeekFrom::Current(len as i64)).is_err() {
+                                break;
+                            }
                             cnt += 1;
-                            if cnt > max_ev { should_rotate = true; break; }
+                            if cnt > max_ev {
+                                should_rotate = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -539,23 +664,39 @@ impl Storage {
             let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
             // Append an extra .rot.<ts> suffix so rotated files keep the original
             // log filename as a prefix (e.g. state.json.events.jsonl.rot.20250101T...)
-            let fname = log_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let fname = log_path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
             let rotated = log_path.with_file_name(format!("{}.rot.{}", fname, ts));
-            std::fs::rename(&log_path, &rotated).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            std::fs::rename(&log_path, &rotated)
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             // create new empty log file
-            std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&log_path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&log_path)
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
 
             // Enforce retention: remove oldest rotated files beyond retention_count
             let retention = self.retention_count;
             if retention > 0 {
                 if let Some(dir) = rotated.parent() {
                     if let Ok(entries) = std::fs::read_dir(dir) {
-                        let prefix = log_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                        let prefix = log_path
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_default();
                         // collect rotated files matching prefix.rot.*
                         let mut rots: Vec<(std::time::SystemTime, PathBuf)> = vec![];
                         for e in entries.filter_map(|e| e.ok()) {
                             let p = e.path();
-                            if p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with(&prefix) && n.contains("rot.")).unwrap_or(false) {
+                            if p.file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|n| n.starts_with(&prefix) && n.contains("rot."))
+                                .unwrap_or(false)
+                            {
                                 if let Ok(meta) = p.metadata() {
                                     if let Ok(mtime) = meta.modified() {
                                         rots.push((mtime, p.clone()));
@@ -585,7 +726,10 @@ impl Storage {
         if self.background_handle.is_some() {
             return Ok(());
         }
-        let interval = match self.compaction_interval_secs.or_else(|| global_compaction_policy().compaction_interval_secs) {
+        let interval = match self
+            .compaction_interval_secs
+            .or_else(|| global_compaction_policy().compaction_interval_secs)
+        {
             Some(s) if s > 0 => s,
             _ => return Ok(()),
         };
@@ -609,13 +753,19 @@ impl Storage {
                     // Try to open and perform a simple rotation snapshot: write the current global snapshot
                     // Note: background compaction uses global snapshot for global storage or file-backed instance snapshot is not accessible here safely.
                     // We'll perform a best-effort: if path exists, rename events log if it exceeds threshold.
-                    let log_path = if let Some(e) = &this_events { e.clone() } else { Storage::events_log_for(p, fmt) };
+                    let log_path = if let Some(e) = &this_events {
+                        e.clone()
+                    } else {
+                        Storage::events_log_for(p, fmt)
+                    };
                     if log_path.exists() {
                         // Check thresholds
                         let mut should_rotate = false;
                         if let Some(ms) = max_size {
                             if let Ok(meta) = std::fs::metadata(&log_path) {
-                                if meta.len() > ms { should_rotate = true; }
+                                if meta.len() > ms {
+                                    should_rotate = true;
+                                }
                             }
                         }
                         if !should_rotate {
@@ -625,26 +775,49 @@ impl Storage {
                                     if let Ok(file) = std::fs::File::open(&log_path) {
                                         let reader = std::io::BufReader::new(file);
                                         let mut cnt = 0usize;
-                                        for _ in reader.lines() { cnt += 1; if cnt > me { should_rotate = true; break; } }
+                                        for _ in reader.lines() {
+                                            cnt += 1;
+                                            if cnt > me {
+                                                should_rotate = true;
+                                                break;
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                         if should_rotate {
                             let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
-                            let fname = log_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                            let fname = log_path
+                                .file_name()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_default();
                             let rotated = log_path.with_file_name(format!("{}.rot.{}", fname, ts));
                             let _ = std::fs::rename(&log_path, &rotated);
-                            let _ = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&log_path);
+                            let _ = std::fs::OpenOptions::new()
+                                .create(true)
+                                .write(true)
+                                .truncate(true)
+                                .open(&log_path);
                             // retention enforcement best-effort
                             if retention > 0 {
                                 if let Some(dir) = rotated.parent() {
                                     if let Ok(entries) = std::fs::read_dir(dir) {
-                                        let prefix = log_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                                        let mut rots: Vec<(std::time::SystemTime, PathBuf)> = vec![];
+                                        let prefix = log_path
+                                            .file_name()
+                                            .map(|s| s.to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        let mut rots: Vec<(std::time::SystemTime, PathBuf)> =
+                                            vec![];
                                         for e in entries.filter_map(|e| e.ok()) {
                                             let p = e.path();
-                                            if p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with(&prefix) && n.contains("rot.")).unwrap_or(false) {
+                                            if p.file_name()
+                                                .and_then(|n| n.to_str())
+                                                .map(|n| {
+                                                    n.starts_with(&prefix) && n.contains("rot.")
+                                                })
+                                                .unwrap_or(false)
+                                            {
                                                 if let Ok(meta) = p.metadata() {
                                                     if let Ok(mtime) = meta.modified() {
                                                         rots.push((mtime, p.clone()));
@@ -736,9 +909,12 @@ impl Storage {
         if !path.exists() {
             return Ok(());
         }
-        let data = fs::read_to_string(&path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        let data = fs::read_to_string(&path)
+            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         let inner: StorageInner = serde_json::from_str(&data)?;
-        let mut guard = GLOBAL_STORAGE.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+        let mut guard = GLOBAL_STORAGE
+            .write()
+            .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
         *guard = inner;
         Ok(())
     }
@@ -746,12 +922,17 @@ impl Storage {
     // Save to a per-instance path. Serialize the current inner state (either global
     // or the instance's inner) and write it to the provided path.
     fn save_to_path(path: &PathBuf, storage: &Storage) -> crate::Result<()> {
-    
         // Determine which inner to read from
         let data_inner = if let Some(inner) = &storage.inner {
-            inner.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?.clone()
+            inner
+                .read()
+                .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?
+                .clone()
         } else {
-            GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?.clone()
+            GLOBAL_STORAGE
+                .read()
+                .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?
+                .clone()
         };
 
         // Serialize according to the chosen persistence format
@@ -759,12 +940,16 @@ impl Storage {
             PersistenceFormat::Json => serde_json::to_vec_pretty(&data_inner)?,
             PersistenceFormat::Cbor => serde_cbor::to_vec(&data_inner)?,
         };
-        
-         // If encryption is enabled on this storage, encrypt the blob and write a wrapper
-         if let Some(key) = &storage.encryption_key {
-             // reuse salt if present
-             let salt = storage.encryption_salt.as_ref().ok_or_else(|| crate::error::TimeLoopError::Configuration("Missing salt for encrypted storage".to_string()))?;
-             let (nonce, ciphertext) = Self::encrypt_bytes(key, data_bytes.as_slice())?;
+
+        // If encryption is enabled on this storage, encrypt the blob and write a wrapper
+        if let Some(key) = &storage.encryption_key {
+            // reuse salt if present
+            let salt = storage.encryption_salt.as_ref().ok_or_else(|| {
+                crate::error::TimeLoopError::Configuration(
+                    "Missing salt for encrypted storage".to_string(),
+                )
+            })?;
+            let (nonce, ciphertext) = Self::encrypt_bytes(key, data_bytes.as_slice())?;
             match storage.persistence_format {
                 PersistenceFormat::Json => {
                     let wrapper = EncryptedFile {
@@ -776,19 +961,23 @@ impl Storage {
                     Self::atomic_write(path, wrapper_json.as_bytes())?;
                 }
                 PersistenceFormat::Cbor => {
-                    let wrapper_cbor = EncryptedFileCbor { salt: salt.clone(), nonce, ciphertext };
+                    let wrapper_cbor = EncryptedFileCbor {
+                        salt: salt.clone(),
+                        nonce,
+                        ciphertext,
+                    };
                     let wrapper_bytes = serde_cbor::to_vec(&wrapper_cbor)?;
                     Self::atomic_write(path, &wrapper_bytes)?;
                 }
             }
-             // zeroize plaintext
-             data_bytes.zeroize();
-         } else {
+            // zeroize plaintext
+            data_bytes.zeroize();
+        } else {
             // Unencrypted path: write according to format directly
             Self::atomic_write(path, data_bytes.as_slice())?;
             data_bytes.zeroize();
-         }
-         Ok(())
+        }
+        Ok(())
     }
 
     // Encrypt given plaintext with the given 32-byte key using XChaCha20-Poly1305.
@@ -801,7 +990,9 @@ impl Storage {
         let mut osrng = rand::rngs::OsRng;
         osrng.fill_bytes(&mut nonce[..]);
         let nonce_arr = XNonce::from_slice(&nonce);
-        let ciphertext = cipher.encrypt(nonce_arr, plaintext).map_err(|e| crate::error::TimeLoopError::FileSystem(format!("Encryption failed: {}", e)))?;
+        let ciphertext = cipher.encrypt(nonce_arr, plaintext).map_err(|e| {
+            crate::error::TimeLoopError::FileSystem(format!("Encryption failed: {}", e))
+        })?;
         Ok((nonce, ciphertext))
     }
 
@@ -815,13 +1006,25 @@ impl Storage {
     }
 
     // Derive a 32-byte key from passphrase + salt using PBKDF2-HMAC-SHA256
-    fn derive_key_with_params(passphrase: &str, salt: &[u8], params: Option<&Argon2Config>) -> [u8; 32] {
+    fn derive_key_with_params(
+        passphrase: &str,
+        salt: &[u8],
+        params: Option<&Argon2Config>,
+    ) -> [u8; 32] {
         let config = params.cloned().unwrap_or_default();
         let mut key = [0u8; 32];
-        use argon2::{Algorithm, Version, Params};
-        let params = Params::new(config.memory_kib, config.iterations, config.parallelism, None).expect("invalid argon2 params");
+        use argon2::{Algorithm, Params, Version};
+        let params = Params::new(
+            config.memory_kib,
+            config.iterations,
+            config.parallelism,
+            None,
+        )
+        .expect("invalid argon2 params");
         let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-        argon.hash_password_into(passphrase.as_bytes(), salt, &mut key).expect("Argon2 key derivation failed");
+        argon
+            .hash_password_into(passphrase.as_bytes(), salt, &mut key)
+            .expect("Argon2 key derivation failed");
         key
     }
 
@@ -829,13 +1032,23 @@ impl Storage {
     /// in-memory state is re-encrypted with a new salt derived from `new_passphrase`.
     /// The old key material is zeroized.
     pub fn change_passphrase(&mut self, new_passphrase: &str) -> crate::Result<()> {
-        let path = self.persistence_path.as_ref().ok_or_else(|| crate::error::TimeLoopError::Configuration("change_passphrase requires a persisted storage path".to_string()))?;
+        let path = self.persistence_path.as_ref().ok_or_else(|| {
+            crate::error::TimeLoopError::Configuration(
+                "change_passphrase requires a persisted storage path".to_string(),
+            )
+        })?;
 
         // Determine current inner state
         let data_inner = if let Some(inner) = &self.inner {
-            inner.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?.clone()
+            inner
+                .read()
+                .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?
+                .clone()
         } else {
-            GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?.clone()
+            GLOBAL_STORAGE
+                .read()
+                .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?
+                .clone()
         };
 
         // Serialize into bytes then encrypt with a newly-derived key
@@ -845,7 +1058,8 @@ impl Storage {
         let mut salt = vec![0u8; 16];
         let mut osrng = rand::rngs::OsRng;
         osrng.fill_bytes(&mut salt);
-        let new_key = Self::derive_key_with_params(new_passphrase, &salt, self.argon2_config.as_ref());
+        let new_key =
+            Self::derive_key_with_params(new_passphrase, &salt, self.argon2_config.as_ref());
 
         // Encrypt
         let (nonce, ciphertext) = Self::encrypt_bytes(&new_key, &data_bytes)?;
@@ -890,7 +1104,10 @@ impl Storage {
     }
 
     fn events_log_for(path: &PathBuf, format: PersistenceFormat) -> PathBuf {
-        let fname = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "state".to_string());
+        let fname = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "state".to_string());
         match format {
             PersistenceFormat::Json => path.with_file_name(format!("{}.events.jsonl", fname)),
             PersistenceFormat::Cbor => path.with_file_name(format!("{}.events.cborlog", fname)),
@@ -918,7 +1135,8 @@ impl Storage {
         }
 
         if self.persistence_format == PersistenceFormat::Json {
-            let file = std::fs::File::open(&path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            let file = std::fs::File::open(&path)
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             let reader = std::io::BufReader::new(file);
             for line in reader.lines() {
                 let l = line.map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
@@ -926,39 +1144,74 @@ impl Storage {
                 if let Ok(wrapper) = serde_json::from_str::<EncryptedEventJson>(&l) {
                     // encrypted
                     if let Some(key) = &self.encryption_key {
-                        let nonce = general_purpose::STANDARD.decode(&wrapper.nonce).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                        let ciphertext = general_purpose::STANDARD.decode(&wrapper.ciphertext).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                        let plain = Self::try_decrypt(key, &nonce, &ciphertext).map_err(|_| crate::error::TimeLoopError::Storage("decryption failed".to_string()))?;
+                        let nonce = general_purpose::STANDARD
+                            .decode(&wrapper.nonce)
+                            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                        let ciphertext = general_purpose::STANDARD
+                            .decode(&wrapper.ciphertext)
+                            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                        let plain = Self::try_decrypt(key, &nonce, &ciphertext).map_err(|_| {
+                            crate::error::TimeLoopError::Storage("decryption failed".to_string())
+                        })?;
                         let event: Event = serde_json::from_slice(&plain)?;
                         // insert event
-                        self.with_write(|g| { g.events.entry(event.session_id.clone()).or_insert_with(Vec::new).push(event); })?;
+                        self.with_write(|g| {
+                            g.events
+                                .entry(event.session_id.clone())
+                                .or_insert_with(Vec::new)
+                                .push(event);
+                        })?;
                     }
                 } else {
                     let event: Event = serde_json::from_str(&l)?;
                     // insert event
-                    self.with_write(|g| { g.events.entry(event.session_id.clone()).or_insert_with(Vec::new).push(event); })?;
+                    self.with_write(|g| {
+                        g.events
+                            .entry(event.session_id.clone())
+                            .or_insert_with(Vec::new)
+                            .push(event);
+                    })?;
                 }
             }
         } else {
             // CBOR log: length-prefixed records: u32 LE length followed by bytes. Or encrypted CBOR wrapper entries.
-            let mut file = std::fs::File::open(&path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            let mut file = std::fs::File::open(&path)
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             loop {
                 let mut len_buf = [0u8; 4];
-                if let Err(_) = file.read_exact(&mut len_buf) { break; }
+                if let Err(_) = file.read_exact(&mut len_buf) {
+                    break;
+                }
                 let len = u32::from_le_bytes(len_buf) as usize;
                 let mut buf = vec![0u8; len];
-                file.read_exact(&mut buf).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                file.read_exact(&mut buf)
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
                 // attempt to deserialize as EncryptedEventCbor first
                 if let Ok(wrapper) = serde_cbor::from_slice::<EncryptedEventCbor>(&buf) {
                     if let Some(key) = &self.encryption_key {
-                        let plain = Self::try_decrypt(key, &wrapper.nonce, &wrapper.ciphertext).map_err(|_| crate::error::TimeLoopError::Storage("decryption failed".to_string()))?;
+                        let plain = Self::try_decrypt(key, &wrapper.nonce, &wrapper.ciphertext)
+                            .map_err(|_| {
+                                crate::error::TimeLoopError::Storage(
+                                    "decryption failed".to_string(),
+                                )
+                            })?;
                         let event: Event = serde_cbor::from_slice(&plain)?;
-                        self.with_write(|g| { g.events.entry(event.session_id.clone()).or_insert_with(Vec::new).push(event); })?;
+                        self.with_write(|g| {
+                            g.events
+                                .entry(event.session_id.clone())
+                                .or_insert_with(Vec::new)
+                                .push(event);
+                        })?;
                     }
                 } else {
                     // treat as raw CBOR Event
                     let event: Event = serde_cbor::from_slice(&buf)?;
-                    self.with_write(|g| { g.events.entry(event.session_id.clone()).or_insert_with(Vec::new).push(event); })?;
+                    self.with_write(|g| {
+                        g.events
+                            .entry(event.session_id.clone())
+                            .or_insert_with(Vec::new)
+                            .push(event);
+                    })?;
                 }
             }
         }
@@ -973,38 +1226,59 @@ impl Storage {
         };
 
         if self.persistence_format == PersistenceFormat::Json {
-            let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             if let Some(key) = &self.encryption_key {
                 // encrypt event JSON bytes
                 let plain = serde_json::to_vec(event)?;
                 let (nonce, ciphertext) = Self::encrypt_bytes(key, &plain)?;
-                let wrapper = EncryptedEventJson { nonce: general_purpose::STANDARD.encode(&nonce), ciphertext: general_purpose::STANDARD.encode(&ciphertext) };
+                let wrapper = EncryptedEventJson {
+                    nonce: general_purpose::STANDARD.encode(&nonce),
+                    ciphertext: general_purpose::STANDARD.encode(&ciphertext),
+                };
                 let line = serde_json::to_string(&wrapper)?;
-                file.write_all(line.as_bytes()).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                file.write_all(b"\n").map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                file.write_all(line.as_bytes())
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                file.write_all(b"\n")
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             } else {
                 let line = serde_json::to_string(event)?;
-                file.write_all(line.as_bytes()).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                file.write_all(b"\n").map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                file.write_all(line.as_bytes())
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                file.write_all(b"\n")
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             }
-            file.flush().map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            file.flush()
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         } else {
-            let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             if let Some(key) = &self.encryption_key {
                 let plain = serde_cbor::to_vec(event)?;
                 let (nonce, ciphertext) = Self::encrypt_bytes(key, &plain)?;
                 let wrapper = EncryptedEventCbor { nonce, ciphertext };
                 let buf = serde_cbor::to_vec(&wrapper)?;
                 let len = (buf.len() as u32).to_le_bytes();
-                file.write_all(&len).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                file.write_all(&buf).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                file.write_all(&len)
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                file.write_all(&buf)
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             } else {
                 let buf = serde_cbor::to_vec(event)?;
                 let len = (buf.len() as u32).to_le_bytes();
-                file.write_all(&len).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                file.write_all(&buf).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                file.write_all(&len)
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                file.write_all(&buf)
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             }
-            file.flush().map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            file.flush()
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         }
         Ok(())
     }
@@ -1026,35 +1300,59 @@ pub struct CompactionPolicy {
 
 impl Default for CompactionPolicy {
     fn default() -> Self {
-        Self { max_log_size_bytes: Some(10 * 1024 * 1024), max_events: Some(100_000), retention_count: 5, compaction_interval_secs: Some(60 * 60) }
+        Self {
+            max_log_size_bytes: Some(10 * 1024 * 1024),
+            max_events: Some(100_000),
+            retention_count: 5,
+            compaction_interval_secs: Some(60 * 60),
+        }
     }
 }
 
 fn global_persistence_format() -> PersistenceFormat {
-    GLOBAL_PERSISTENCE_FORMAT.get_or_init(|| RwLock::new(PersistenceFormat::Json)).read().unwrap().clone()
+    GLOBAL_PERSISTENCE_FORMAT
+        .get_or_init(|| RwLock::new(PersistenceFormat::Json))
+        .read()
+        .unwrap()
+        .clone()
 }
 
 fn global_append_only() -> bool {
-    *GLOBAL_APPEND_ONLY.get_or_init(|| RwLock::new(false)).read().unwrap()
+    *GLOBAL_APPEND_ONLY
+        .get_or_init(|| RwLock::new(false))
+        .read()
+        .unwrap()
 }
 
 fn global_compaction_policy() -> CompactionPolicy {
-    GLOBAL_COMPACTION_POLICY.get_or_init(|| RwLock::new(CompactionPolicy::default())).read().unwrap().clone()
+    GLOBAL_COMPACTION_POLICY
+        .get_or_init(|| RwLock::new(CompactionPolicy::default()))
+        .read()
+        .unwrap()
+        .clone()
 }
 
 fn global_argon2_config() -> Argon2Config {
-    GLOBAL_ARGON2_CONFIG.get_or_init(|| RwLock::new(Argon2Config::default())).read().unwrap().clone()
+    GLOBAL_ARGON2_CONFIG
+        .get_or_init(|| RwLock::new(Argon2Config::default()))
+        .read()
+        .unwrap()
+        .clone()
 }
 
 impl Storage {
     pub fn set_global_compaction_policy(policy: CompactionPolicy) {
         let cell = GLOBAL_COMPACTION_POLICY.get_or_init(|| RwLock::new(policy));
-        if let Ok(mut guard) = cell.write() { *guard = policy; }
+        if let Ok(mut guard) = cell.write() {
+            *guard = policy;
+        }
     }
 
     pub fn set_global_argon2_config(cfg: Argon2Config) {
         let cell = GLOBAL_ARGON2_CONFIG.get_or_init(|| RwLock::new(cfg.clone()));
-        if let Ok(mut guard) = cell.write() { *guard = cfg; }
+        if let Ok(mut guard) = cell.write() {
+            *guard = cfg;
+        }
     }
 }
 
@@ -1075,15 +1373,15 @@ struct EncryptedEventCbor {
 mod tests {
     use super::*;
     use crate::EventType;
-    use uuid::Uuid;
     use tempfile::TempDir;
+    use uuid::Uuid;
 
     #[test]
     fn test_in_memory_storage() {
         let tmp_dir = TempDir::new().unwrap();
         let state_file = tmp_dir.path().join("state.json");
         let storage = Storage::with_path(state_file.to_str().unwrap()).unwrap();
-        
+
         // Test session storage
         let session = Session {
             id: "test-session".to_string(),
@@ -1093,11 +1391,11 @@ mod tests {
             parent_session_id: None,
             branch_name: None,
         };
-        
+
         storage.store_session(&session).unwrap();
         let retrieved = storage.get_session("test-session").unwrap().unwrap();
         assert_eq!(retrieved.id, "test-session");
-        
+
         // Test event storage
         let event = Event {
             id: Uuid::new_v4().to_string(),
@@ -1109,7 +1407,7 @@ mod tests {
             sequence_number: 1,
             timestamp: Utc::now(),
         };
-        
+
         storage.store_event(&event).unwrap();
         let events = storage.get_events_for_session("test-session").unwrap();
         assert_eq!(events.len(), 1);
@@ -1183,11 +1481,11 @@ mod tests {
         // Flush to persist
         storage.flush().unwrap();
 
-    // Drop storage to close file handles
-    drop(storage);
+        // Drop storage to close file handles
+        drop(storage);
 
-    // Reopen storage using the same temp file path
-    let storage = Storage::with_path(state_file.to_str().unwrap()).unwrap();
+        // Reopen storage using the same temp file path
+        let storage = Storage::with_path(state_file.to_str().unwrap()).unwrap();
 
         // Verify restored state
         let sessions = storage.list_sessions().unwrap();
@@ -1204,10 +1502,14 @@ mod tests {
         // Compare key values to avoid asserting on timestamps directly
         if let EventType::KeyPress { key, .. } = &events[0].event_type {
             assert_eq!(key, "a");
-        } else { panic!("expected key press event"); }
+        } else {
+            panic!("expected key press event");
+        }
         if let EventType::KeyPress { key, .. } = &events[1].event_type {
             assert_eq!(key, "b");
-        } else { panic!("expected key press event"); }
+        } else {
+            panic!("expected key press event");
+        }
     }
 
     #[test]
@@ -1242,7 +1544,8 @@ mod tests {
         let state_file = tmp_dir.path().join("state.json");
 
         // Create encrypted storage with default argon2 params
-        let mut storage = Storage::with_encryption(state_file.to_str().unwrap(), "oldpass").unwrap();
+        let mut storage =
+            Storage::with_encryption(state_file.to_str().unwrap(), "oldpass").unwrap();
         let session = Session {
             id: "cp-session".to_string(),
             name: "ChangePass Session".to_string(),
@@ -1343,10 +1646,14 @@ mod tests {
         // Compare key values to avoid asserting on timestamps directly
         if let EventType::KeyPress { key, .. } = &events[0].event_type {
             assert_eq!(key, "x");
-        } else { panic!("expected key press event"); }
+        } else {
+            panic!("expected key press event");
+        }
         if let EventType::KeyPress { key, .. } = &events[1].event_type {
             assert_eq!(key, "y");
-        } else { panic!("expected key press event"); }
+        } else {
+            panic!("expected key press event");
+        }
     }
 
     #[test]
@@ -1355,7 +1662,8 @@ mod tests {
         let state_file = tmp_dir.path().join("state-encrypted.cbor");
 
         // Create encrypted storage with default argon2 params
-        let mut storage = Storage::with_encryption(state_file.to_str().unwrap(), "securepass").unwrap();
+        let mut storage =
+            Storage::with_encryption(state_file.to_str().unwrap(), "securepass").unwrap();
         let session = Session {
             id: "enc-session".to_string(),
             name: "Encrypted Session".to_string(),
@@ -1371,7 +1679,8 @@ mod tests {
         storage.change_passphrase("newsecurepass").unwrap();
 
         // Reopen with new passphrase
-        let storage2 = Storage::with_encryption(state_file.to_str().unwrap(), "newsecurepass").unwrap();
+        let storage2 =
+            Storage::with_encryption(state_file.to_str().unwrap(), "newsecurepass").unwrap();
         let retrieved = storage2.get_session("enc-session").unwrap().unwrap();
         assert_eq!(retrieved.id, "enc-session");
 
@@ -1384,18 +1693,38 @@ mod tests {
     fn test_append_only_json() {
         let tmp_dir = TempDir::new().unwrap();
         let state_file = tmp_dir.path().join("append_only.json");
-        let mut storage = Storage::with_path_and_format(state_file.to_str().unwrap(), PersistenceFormat::Json).unwrap();
+        let mut storage =
+            Storage::with_path_and_format(state_file.to_str().unwrap(), PersistenceFormat::Json)
+                .unwrap();
         storage.enable_append_only();
 
-        let session = Session { id: "aj-session".to_string(), name: "Append JSON".to_string(), created_at: Utc::now(), ended_at: None, parent_session_id: None, branch_name: None };
+        let session = Session {
+            id: "aj-session".to_string(),
+            name: "Append JSON".to_string(),
+            created_at: Utc::now(),
+            ended_at: None,
+            parent_session_id: None,
+            branch_name: None,
+        };
         storage.store_session(&session).unwrap();
 
-        let ev = Event { id: Uuid::new_v4().to_string(), session_id: "aj-session".to_string(), event_type: EventType::KeyPress { key: "k".to_string(), timestamp: Utc::now() }, sequence_number: 1, timestamp: Utc::now() };
+        let ev = Event {
+            id: Uuid::new_v4().to_string(),
+            session_id: "aj-session".to_string(),
+            event_type: EventType::KeyPress {
+                key: "k".to_string(),
+                timestamp: Utc::now(),
+            },
+            sequence_number: 1,
+            timestamp: Utc::now(),
+        };
         storage.store_event(&ev).unwrap();
         storage.flush().unwrap();
 
         drop(storage);
-        let storage2 = Storage::with_path_and_format(state_file.to_str().unwrap(), PersistenceFormat::Json).unwrap();
+        let storage2 =
+            Storage::with_path_and_format(state_file.to_str().unwrap(), PersistenceFormat::Json)
+                .unwrap();
         let events = storage2.get_events_for_session("aj-session").unwrap();
         assert_eq!(events.len(), 1);
     }
@@ -1404,18 +1733,38 @@ mod tests {
     fn test_append_cbor_roundtrip() {
         let tmp_dir = TempDir::new().unwrap();
         let state_file = tmp_dir.path().join("state.cbor");
-        let mut storage = Storage::with_path_and_format(state_file.to_str().unwrap(), PersistenceFormat::Cbor).unwrap();
+        let mut storage =
+            Storage::with_path_and_format(state_file.to_str().unwrap(), PersistenceFormat::Cbor)
+                .unwrap();
         storage.enable_append_only();
 
-        let session = Session { id: "ac-session".to_string(), name: "Append CBOR".to_string(), created_at: Utc::now(), ended_at: None, parent_session_id: None, branch_name: None };
+        let session = Session {
+            id: "ac-session".to_string(),
+            name: "Append CBOR".to_string(),
+            created_at: Utc::now(),
+            ended_at: None,
+            parent_session_id: None,
+            branch_name: None,
+        };
         storage.store_session(&session).unwrap();
 
-        let ev = Event { id: Uuid::new_v4().to_string(), session_id: "ac-session".to_string(), event_type: EventType::KeyPress { key: "k".to_string(), timestamp: Utc::now() }, sequence_number: 1, timestamp: Utc::now() };
+        let ev = Event {
+            id: Uuid::new_v4().to_string(),
+            session_id: "ac-session".to_string(),
+            event_type: EventType::KeyPress {
+                key: "k".to_string(),
+                timestamp: Utc::now(),
+            },
+            sequence_number: 1,
+            timestamp: Utc::now(),
+        };
         storage.store_event(&ev).unwrap();
         storage.flush().unwrap();
 
         drop(storage);
-        let storage2 = Storage::with_path_and_format(state_file.to_str().unwrap(), PersistenceFormat::Cbor).unwrap();
+        let storage2 =
+            Storage::with_path_and_format(state_file.to_str().unwrap(), PersistenceFormat::Cbor)
+                .unwrap();
         let events = storage2.get_events_for_session("ac-session").unwrap();
         assert_eq!(events.len(), 1);
     }
@@ -1425,28 +1774,43 @@ mod tests {
         use std::io::Write as _;
         let tmp_dir = TempDir::new().unwrap();
         let state_file = tmp_dir.path().join("state.json");
-        let mut storage = Storage::with_path_and_format(state_file.to_str().unwrap(), PersistenceFormat::Json).unwrap();
+        let mut storage =
+            Storage::with_path_and_format(state_file.to_str().unwrap(), PersistenceFormat::Json)
+                .unwrap();
         storage.enable_append_only();
-    // Lower thresholds for test via setters
-    storage.set_max_log_size_bytes(Some(1024)); // 1 KiB
-    storage.set_retention_count(2);
+        // Lower thresholds for test via setters
+        storage.set_max_log_size_bytes(Some(1024)); // 1 KiB
+        storage.set_retention_count(2);
 
         // Append events until file exceeds threshold
         for i in 0..200 {
-            let ev = Event { id: Uuid::new_v4().to_string(), session_id: "rt-session".to_string(), event_type: EventType::KeyPress { key: format!("k{}", i), timestamp: Utc::now() }, sequence_number: i, timestamp: Utc::now() };
+            let ev = Event {
+                id: Uuid::new_v4().to_string(),
+                session_id: "rt-session".to_string(),
+                event_type: EventType::KeyPress {
+                    key: format!("k{}", i),
+                    timestamp: Utc::now(),
+                },
+                sequence_number: i,
+                timestamp: Utc::now(),
+            };
             storage.store_event(&ev).unwrap();
         }
         // Force compaction/rotation
         storage.compact().unwrap();
 
-    // Check rotated files exist (at least one rot file)
-    // clone to avoid moving out of `storage` so we can call `storage.compact()` later
-    let events_path = storage.events_log_path.clone().unwrap();
+        // Check rotated files exist (at least one rot file)
+        // clone to avoid moving out of `storage` so we can call `storage.compact()` later
+        let events_path = storage.events_log_path.clone().unwrap();
         let dir = events_path.parent().unwrap();
         let mut rotated_count = 0usize;
         for entry in std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()) {
             let p = entry.path();
-            if p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("state.json.events.jsonl") && n.contains("rot.")).unwrap_or(false) {
+            if p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("state.json.events.jsonl") && n.contains("rot."))
+                .unwrap_or(false)
+            {
                 rotated_count += 1;
             }
         }
@@ -1454,7 +1818,8 @@ mod tests {
 
         // Create additional rotated files to exceed retention and then run compact again
         for t in 0..4 {
-            let fake = events_path.with_extension(format!("rot.test{}.{}", t, Utc::now().timestamp()));
+            let fake =
+                events_path.with_extension(format!("rot.test{}.{}", t, Utc::now().timestamp()));
             let mut f = std::fs::File::create(&fake).unwrap();
             f.write_all(b"x").unwrap();
         }
@@ -1465,7 +1830,11 @@ mod tests {
         let mut rots = vec![];
         for entry in std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()) {
             let p = entry.path();
-            if p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("state.json.events.jsonl") && n.contains("rot.")).unwrap_or(false) {
+            if p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("state.json.events.jsonl") && n.contains("rot."))
+                .unwrap_or(false)
+            {
                 rots.push(p);
             }
         }

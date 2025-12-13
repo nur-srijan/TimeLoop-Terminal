@@ -322,6 +322,12 @@ cargo fmt
 
 # Check for issues
 cargo clippy
+
+# Pre-commit hooks
+# This project uses pre-commit to ensure code quality.
+# To install the hooks:
+pip install pre-commit
+pre-commit install
 ```
 
 ## 📄 License

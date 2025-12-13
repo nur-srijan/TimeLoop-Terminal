@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
-use uuid::Uuid;
 use crate::storage::Storage;
+use chrono::{DateTime, Utc};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum EventType {
@@ -92,7 +92,10 @@ impl EventRecorder {
             r"(?i)(password|pwd|secret|token|api_key)\s*[:=]\s*[^\s\n]+".to_string(),
             r"(?i)bearer\s+[A-Za-z0-9\-\._]+".to_string(),
         ];
-        let compiled = default_patterns.into_iter().filter_map(|p| Regex::new(&p).ok()).collect();
+        let compiled = default_patterns
+            .into_iter()
+            .filter_map(|p| Regex::new(&p).ok())
+            .collect();
 
         Ok(Self {
             session_id: session_id.to_string(),
@@ -112,7 +115,12 @@ impl EventRecorder {
 
     /// Create an EventRecorder with redaction enabled. Patterns are optional; if
     /// none are provided a sensible default set is used.
-    pub fn with_storage_and_redaction(session_id: &str, storage: Storage, redact: bool, patterns: Option<Vec<String>>) -> Self {
+    pub fn with_storage_and_redaction(
+        session_id: &str,
+        storage: Storage,
+        redact: bool,
+        patterns: Option<Vec<String>>,
+    ) -> Self {
         let last_seq = storage
             .get_last_event(session_id)
             .ok()
@@ -121,12 +129,18 @@ impl EventRecorder {
             .unwrap_or(0);
 
         let compiled = if redact {
-            let pats = patterns.unwrap_or_else(|| vec![
-                r"(?i)(password|pwd|secret|token|api_key)\s*[:=]\s*[^\s\n]+".to_string(),
-                r"(?i)bearer\s+[A-Za-z0-9\-\._]+".to_string(),
-            ]);
-            pats.into_iter().filter_map(|p| Regex::new(&p).ok()).collect()
-        } else { Vec::new() };
+            let pats = patterns.unwrap_or_else(|| {
+                vec![
+                    r"(?i)(password|pwd|secret|token|api_key)\s*[:=]\s*[^\s\n]+".to_string(),
+                    r"(?i)bearer\s+[A-Za-z0-9\-\._]+".to_string(),
+                ]
+            });
+            pats.into_iter()
+                .filter_map(|p| Regex::new(&p).ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         Self {
             session_id: session_id.to_string(),
@@ -161,7 +175,6 @@ impl EventRecorder {
             current_command: None,
             redact_output: false,
             redact_patterns: Vec::new(),
-
         }
     }
 
@@ -175,19 +188,25 @@ impl EventRecorder {
             },
             self.sequence_counter,
         );
-        
+
         self.storage.store_event(&event)?;
         Ok(())
     }
 
-    pub fn record_command(&mut self, command: &str, output: &str, exit_code: i32, working_dir: &str) -> crate::Result<()> {
+    pub fn record_command(
+        &mut self,
+        command: &str,
+        output: &str,
+        exit_code: i32,
+        working_dir: &str,
+    ) -> crate::Result<()> {
         self.sequence_counter += 1;
         let stored_output = if self.redact_output {
             self.apply_redaction(output)
         } else {
             output.to_string()
         };
-        
+
         let event = Event::new(
             &self.session_id,
             EventType::Command {
@@ -199,13 +218,17 @@ impl EventRecorder {
             },
             self.sequence_counter,
         );
-        
+
         self.storage.store_event(&event)?;
         self.current_command = None;
         Ok(())
     }
 
-    pub fn record_file_change(&mut self, path: &str, change_type: FileChangeType) -> crate::Result<()> {
+    pub fn record_file_change(
+        &mut self,
+        path: &str,
+        change_type: FileChangeType,
+    ) -> crate::Result<()> {
         self.sequence_counter += 1;
         let event = Event::new(
             &self.session_id,
@@ -217,12 +240,16 @@ impl EventRecorder {
             },
             self.sequence_counter,
         );
-        
+
         self.storage.store_event(&event)?;
         Ok(())
     }
 
-    pub fn record_terminal_state(&mut self, cursor_pos: (u16, u16), screen_size: (u16, u16)) -> crate::Result<()> {
+    pub fn record_terminal_state(
+        &mut self,
+        cursor_pos: (u16, u16),
+        screen_size: (u16, u16),
+    ) -> crate::Result<()> {
         self.sequence_counter += 1;
         let event = Event::new(
             &self.session_id,
@@ -233,7 +260,7 @@ impl EventRecorder {
             },
             self.sequence_counter,
         );
-        
+
         self.storage.store_event(&event)?;
         Ok(())
     }
@@ -242,7 +269,12 @@ impl EventRecorder {
         self.storage.get_events_for_session(session_id)
     }
 
-    pub fn get_events_in_range(&self, session_id: &str, start: DateTime<Utc>, end: DateTime<Utc>) -> crate::Result<Vec<Event>> {
+    pub fn get_events_in_range(
+        &self,
+        session_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> crate::Result<Vec<Event>> {
         self.storage.get_events_in_range(session_id, start, end)
     }
 
@@ -282,15 +314,25 @@ mod tests {
         let tmp_dir = tempfile::TempDir::new().unwrap();
         let db_path = tmp_dir.path().join("events_redaction.db");
         let storage = crate::storage::Storage::with_path(db_path.to_str().unwrap()).unwrap();
-        let mut recorder = EventRecorder::with_storage_and_redaction("redact-session", storage, true, None);
+        let mut recorder =
+            EventRecorder::with_storage_and_redaction("redact-session", storage, true, None);
 
-        recorder.record_command("echo secret", "password=supersecret token=abc123", 0, "/tmp").unwrap();
+        recorder
+            .record_command(
+                "echo secret",
+                "password=supersecret token=abc123",
+                0,
+                "/tmp",
+            )
+            .unwrap();
         let events = recorder.get_events_for_session("redact-session").unwrap();
         assert_eq!(events.len(), 1);
         if let EventType::Command { output, .. } = &events[0].event_type {
             assert!(output.contains("[REDACTED]"));
             assert!(!output.contains("supersecret"));
             assert!(!output.contains("abc123"));
-        } else { panic!("expected command event"); }
+        } else {
+            panic!("expected command event");
+        }
     }
 }

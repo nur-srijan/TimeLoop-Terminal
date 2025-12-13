@@ -1,7 +1,7 @@
 #![cfg(feature = "gui")]
 
 use eframe::egui;
-use timeloop_terminal::{SessionManager, ReplayEngine};
+use timeloop_terminal::{ReplayEngine, SessionManager};
 
 // Minimal GUI app that lists sessions and shows summary + simple replay controls
 struct TimeLoopGui {
@@ -42,7 +42,13 @@ impl eframe::App for TimeLoopGui {
             ui.label("Sessions:");
             ui.separator();
             for s in &self.sessions {
-                if ui.selectable_label(self.selected.as_deref() == Some(&s.id), format!("{} - {}", s.id, s.name)).clicked() {
+                if ui
+                    .selectable_label(
+                        self.selected.as_deref() == Some(&s.id),
+                        format!("{} - {}", s.id, s.name),
+                    )
+                    .clicked()
+                {
                     self.selected = Some(s.id.clone());
                     // load summary
                     if let Ok(sm) = SessionManager::new() {
@@ -85,7 +91,10 @@ impl eframe::App for TimeLoopGui {
                     ui.label(format!("Duration: {}s", rs.duration.num_seconds()));
 
                     ui.horizontal(|ui| {
-                        if ui.button(if self.playing { "Pause" } else { "Play" }).clicked() {
+                        if ui
+                            .button(if self.playing { "Pause" } else { "Play" })
+                            .clicked()
+                        {
                             self.playing = !self.playing;
                         }
                         if ui.button("Step +1s").clicked() {
@@ -100,11 +109,21 @@ impl eframe::App for TimeLoopGui {
                     // Simple timeline visualization
                     let fraction = if rs.duration.num_milliseconds() > 0 {
                         (self.position_ms as f64) / (rs.duration.num_milliseconds() as f64)
-                    } else { 0.0 };
-                    let (rect, _response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 4.0, egui::Color32::DARK_GRAY);
-                    let filled = egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + rect.width() * fraction as f32, rect.max.y));
-                    ui.painter().rect_filled(filled, 4.0, egui::Color32::LIGHT_GREEN);
+                    } else {
+                        0.0
+                    };
+                    let (rect, _response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 30.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter()
+                        .rect_filled(rect, 4.0, egui::Color32::DARK_GRAY);
+                    let filled = egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.min.x + rect.width() * fraction as f32, rect.max.y),
+                    );
+                    ui.painter()
+                        .rect_filled(filled, 4.0, egui::Color32::LIGHT_GREEN);
 
                     // Playback advancement
                     if self.playing {
@@ -119,7 +138,6 @@ impl eframe::App for TimeLoopGui {
                         }
                         ctx.request_repaint();
                     }
-
                 } else {
                     ui.label("No replay summary available for this session.");
                 }
