@@ -1,16 +1,16 @@
-use std::process::{Command, Stdio};
-use std::io::{self, Write};
-use std::path::PathBuf;
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use crate::file_watcher::FileWatcher;
+use crate::{EventRecorder, FileChangeType, TimeLoopError};
 use crossterm::{
+    style::{Color, ResetColor, SetForegroundColor},
     terminal::{disable_raw_mode, enable_raw_mode},
-    style::{Color, SetForegroundColor, ResetColor},
     ExecutableCommand,
 };
+use std::collections::VecDeque;
+use std::io::{self, Write};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
-use crate::{EventRecorder, TimeLoopError, FileChangeType};
-use crate::file_watcher::FileWatcher;
 
 pub struct TerminalEmulator {
     pub(crate) event_recorder: Arc<Mutex<EventRecorder>>,
@@ -22,10 +22,8 @@ pub struct TerminalEmulator {
 
 impl TerminalEmulator {
     pub fn new(event_recorder: EventRecorder) -> crate::Result<Self> {
-        let working_directory = std::env::current_dir()?
-            .to_string_lossy()
-            .to_string();
-        
+        let working_directory = std::env::current_dir()?.to_string_lossy().to_string();
+
         Ok(Self {
             event_recorder: Arc::new(Mutex::new(event_recorder)),
             working_directory,
@@ -44,15 +42,17 @@ impl TerminalEmulator {
             // Create callback closure to record file changes
             let cb: crate::file_watcher::FileChangeCallback = {
                 let recorder = recorder.clone();
-                Arc::new(tokio::sync::Mutex::new(move |path: &str, change: FileChangeType| {
-                    // Synchronous closure: use std::sync::Mutex to mutate recorder
-                    if let Ok(mut guard) = recorder.lock() {
-                        if let Err(e) = guard.record_file_change(path, change) {
-                            eprintln!("Error recording file change: {}", e);
+                Arc::new(tokio::sync::Mutex::new(
+                    move |path: &str, change: FileChangeType| {
+                        // Synchronous closure: use std::sync::Mutex to mutate recorder
+                        if let Ok(mut guard) = recorder.lock() {
+                            if let Err(e) = guard.record_file_change(path, change) {
+                                eprintln!("Error recording file change: {}", e);
+                            }
                         }
-                    }
-                    Ok(())
-                }))
+                        Ok(())
+                    },
+                ))
             };
 
             let mut watcher = match FileWatcher::new(cb) {
@@ -98,40 +98,40 @@ impl TerminalEmulator {
         if let Ok(mut guard) = self.event_recorder.lock() {
             guard.record_terminal_state((0, 0), (cols, rows))?;
         }
-        
+
         // Start file watching
         if let Err(e) = self.start_file_watching().await {
             eprintln!("Warning: Could not start file watching: {}", e);
         }
-        
+
         // Print welcome message with styling
         let mut stdout = io::stdout();
         stdout.execute(SetForegroundColor(Color::Cyan))?;
         println!("╔════════════════════════════════════════════════════╗");
         println!("║                                                    ║");
         stdout.execute(SetForegroundColor(Color::Blue))?;
-        
+
         if cfg!(target_os = "windows") {
             println!("║            TimeLoop Terminal - PowerShell          ║");
         } else {
             println!("║              TimeLoop Terminal - Bash              ║");
         }
-        
+
         stdout.execute(SetForegroundColor(Color::Cyan))?;
         println!("║                                                    ║");
         println!("╚════════════════════════════════════════════════════╝");
         stdout.execute(ResetColor)?;
-        
+
         // Print help info
         stdout.execute(SetForegroundColor(Color::Yellow))?;
         println!("Type 'exit' to quit | All shell commands are supported");
         stdout.execute(ResetColor)?;
         println!("─────────────────────────────────────────────────────");
-        
+
         // Main loop using standard input
         let stdin = io::stdin();
         let mut stdout = io::stdout();
-        
+
         let result = loop {
             // Display styled prompt
             stdout.execute(SetForegroundColor(Color::Green))?;
@@ -142,26 +142,26 @@ impl TerminalEmulator {
             print!(" > ");
             stdout.execute(ResetColor)?;
             stdout.flush()?;
-            
+
             // Read a line of input
             let mut input = String::new();
             stdin.read_line(&mut input)?;
-            
+
             // Trim the input
             let input = input.trim();
-            
+
             // Record the command
             if let Ok(mut guard) = self.event_recorder.lock() {
                 for c in input.chars() {
                     guard.record_key_press(&c.to_string())?;
                 }
             }
-            
+
             // Skip empty input
             if input.is_empty() {
                 continue;
             }
-            
+
             // Add command to history if not empty
             if !input.is_empty() {
                 // Add to history, removing oldest if at capacity
@@ -170,7 +170,7 @@ impl TerminalEmulator {
                 }
                 self.command_history.push_back(input.to_string());
             }
-            
+
             // Only handle exit command internally, pass everything else to the shell
             if input == "exit" || input == "quit" {
                 stdout.execute(SetForegroundColor(Color::Green))?;
@@ -184,7 +184,7 @@ impl TerminalEmulator {
                     let home = std::env::var("USERPROFILE")
                         .or_else(|_| std::env::var("HOME"))
                         .unwrap_or_else(|_| ".".to_string());
-                    
+
                     if let Err(e) = std::env::set_current_dir(&home) {
                         println!("Error changing to home directory: {}", e);
                     } else {
@@ -206,7 +206,7 @@ impl TerminalEmulator {
                 } else if input.starts_with("cd ") {
                     // Extract the directory path
                     let path = input.trim_start_matches("cd ").trim();
-                    
+
                     // Try to change directory
                     if let Err(e) = std::env::set_current_dir(path) {
                         println!("Error changing directory: {}", e);
@@ -216,20 +216,28 @@ impl TerminalEmulator {
                             self.working_directory = new_dir.to_string_lossy().to_string();
                         }
                     }
-                } else if input.starts_with("Set-Location ") || input.starts_with("sl ") || input.starts_with("chdir ") {
+                } else if input.starts_with("Set-Location ")
+                    || input.starts_with("sl ")
+                    || input.starts_with("chdir ")
+                {
                     // Extract the directory path from the PowerShell command
                     let path_start = input.find(' ').map(|i| i + 1).unwrap_or(input.len());
                     let path = input[path_start..].trim();
-                    
+
                     // Remove quotes if present
                     let path = path.trim_start_matches('"').trim_end_matches('"');
-                    
+
                     // Try to change directory directly
                     if let Err(e) = std::env::set_current_dir(path) {
                         // If direct change fails, execute via PowerShell and show output
                         let output = self.execute_external_command(input).await?;
                         if let Ok(mut guard) = self.event_recorder.lock() {
-                            guard.record_command(input, &output.output, output.exit_code, &self.working_directory)?;
+                            guard.record_command(
+                                input,
+                                &output.output,
+                                output.exit_code,
+                                &self.working_directory,
+                            )?;
                         }
                         println!("Error changing directory: {}", e);
                     } else {
@@ -237,7 +245,7 @@ impl TerminalEmulator {
                         if let Ok(mut guard) = self.event_recorder.lock() {
                             guard.record_command(input, "", 0, &self.working_directory)?;
                         }
-                        
+
                         // Update working directory
                         if let Ok(new_dir) = std::env::current_dir() {
                             self.working_directory = new_dir.to_string_lossy().to_string();
@@ -247,26 +255,37 @@ impl TerminalEmulator {
                     // For all other commands, just execute them normally
                     let output = self.execute_external_command(input).await?;
                     if let Ok(mut guard) = self.event_recorder.lock() {
-                        guard.record_command(input, &output.output, output.exit_code, &self.working_directory)?;
+                        guard.record_command(
+                            input,
+                            &output.output,
+                            output.exit_code,
+                            &self.working_directory,
+                        )?;
                     }
                 }
             }
         };
-        
+
         // Cleanup: stop file watching
         self.stop_file_watching().await;
-        
+
         disable_raw_mode()?;
         result
     }
-    
+
     async fn execute_external_command(&self, command: &str) -> crate::Result<CommandOutput> {
         // Use the appropriate shell based on the platform
         let mut cmd = if cfg!(target_os = "windows") {
             // On Windows, use PowerShell with proper arguments to execute commands
             let mut cmd = Command::new("powershell");
             // Use -NoProfile to start faster, -ExecutionPolicy Bypass to allow script execution
-            cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]);
+            cmd.args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            ]);
             cmd
         } else {
             // On Unix systems, use bash with -c to execute commands
@@ -274,17 +293,18 @@ impl TerminalEmulator {
             cmd.args(["-c", command]);
             cmd
         };
-        
+
         cmd.current_dir(&self.working_directory);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd.output()
+        let output = cmd
+            .output()
             .map_err(|e| TimeLoopError::CommandExecution(e.to_string()))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        
+
         let combined_output = if !stderr.is_empty() {
             format!("{}\n{}", stdout, stderr)
         } else {
@@ -306,7 +326,7 @@ impl TerminalEmulator {
 struct CommandOutput {
     output: String,
     exit_code: i32,
-} 
+}
 
 #[cfg(test)]
 mod tests {
@@ -320,17 +340,19 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path().join("events.db");
         let storage = crate::storage::Storage::with_path(db_path.to_str().unwrap()).unwrap();
-        
+
         // Create session manager and session
         let mut session_manager = crate::session::SessionManager::with_storage(storage);
         let session_id = session_manager.create_session("file-watch-test").unwrap();
-        
+
         // Create event recorder with a separate database path to avoid conflicts
         let event_db_path = tmp_dir.path().join("events2.db");
-        let event_recorder_storage = crate::storage::Storage::with_path(event_db_path.to_str().unwrap()).unwrap();
-        let event_recorder = crate::events::EventRecorder::with_storage(&session_id, event_recorder_storage);
+        let event_recorder_storage =
+            crate::storage::Storage::with_path(event_db_path.to_str().unwrap()).unwrap();
+        let event_recorder =
+            crate::events::EventRecorder::with_storage(&session_id, event_recorder_storage);
         let mut terminal = TerminalEmulator::new(event_recorder).unwrap();
-        
+
         // Test that file watching starts without error
         match terminal.start_file_watching().await {
             Ok(_) => println!("File watching started successfully"),
@@ -339,13 +361,13 @@ mod tests {
                 panic!("File watching failed: {}", e);
             }
         }
-        
+
         // Wait a moment
         sleep(Duration::from_millis(100)).await;
-        
+
         // Test that file watching stops without error
         terminal.stop_file_watching().await;
-        
+
         // If we get here, the test passes
         assert!(true);
     }

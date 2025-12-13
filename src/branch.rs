@@ -1,7 +1,7 @@
-use serde::{Serialize, Deserialize};
+use crate::{Event, Storage, TimeLoopError};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::{Storage, Event, TimeLoopError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineBranch {
@@ -23,7 +23,13 @@ impl BranchManager {
         Ok(Self { storage })
     }
 
-    pub fn create_branch(&mut self, parent_session_id: &str, name: &str, branch_point_event_id: &str, description: Option<&str>) -> crate::Result<String> {
+    pub fn create_branch(
+        &mut self,
+        parent_session_id: &str,
+        name: &str,
+        branch_point_event_id: &str,
+        description: Option<&str>,
+    ) -> crate::Result<String> {
         let branch_id = Uuid::new_v4().to_string();
         let branch = TimelineBranch {
             id: branch_id.clone(),
@@ -33,7 +39,7 @@ impl BranchManager {
             created_at: Utc::now(),
             description: description.map(|s| s.to_string()),
         };
-        
+
         self.storage.store_branch(&branch)?;
         Ok(branch_id)
     }
@@ -56,35 +62,41 @@ impl BranchManager {
     }
 
     pub fn replay_branch(&self, branch_id: &str) -> crate::Result<Vec<Event>> {
-        let branch = self.get_branch(branch_id)?
+        let branch = self
+            .get_branch(branch_id)?
             .ok_or_else(|| TimeLoopError::Branch(format!("Branch {} not found", branch_id)))?;
-        
+
         // Get all events from the parent session up to the branch point
-        let parent_events = self.storage.get_events_for_session(&branch.parent_session_id)?;
-        
+        let parent_events = self
+            .storage
+            .get_events_for_session(&branch.parent_session_id)?;
+
         // Find the branch point event
         let branch_point_index = parent_events
             .iter()
             .position(|event| event.id == branch.branch_point_event_id)
             .ok_or_else(|| TimeLoopError::Branch("Branch point event not found".to_string()))?;
-        
+
         // Return events up to and including the branch point
         Ok(parent_events[..=branch_point_index].to_vec())
     }
 
     pub fn get_branch_timeline(&self, branch_id: &str) -> crate::Result<BranchTimeline> {
-        let branch = self.get_branch(branch_id)?
+        let branch = self
+            .get_branch(branch_id)?
             .ok_or_else(|| TimeLoopError::Branch(format!("Branch {} not found", branch_id)))?;
-        
-        let parent_events = self.storage.get_events_for_session(&branch.parent_session_id)?;
+
+        let parent_events = self
+            .storage
+            .get_events_for_session(&branch.parent_session_id)?;
         let branch_events = self.storage.get_events_for_session(branch_id)?;
-        
+
         // Find the branch point
         let branch_point_index = parent_events
             .iter()
             .position(|event| event.id == branch.branch_point_event_id)
             .ok_or_else(|| TimeLoopError::Branch("Branch point event not found".to_string()))?;
-        
+
         Ok(BranchTimeline {
             branch,
             parent_events: parent_events[..=branch_point_index].to_vec(),
@@ -94,7 +106,7 @@ impl BranchManager {
 
     pub fn merge_branch(&mut self, branch_id: &str, target_session_id: &str) -> crate::Result<()> {
         let branch_timeline = self.get_branch_timeline(branch_id)?;
-        
+
         // Copy branch events to the target session
         for event in &branch_timeline.branch_events {
             let mut new_event = event.clone();
@@ -102,7 +114,7 @@ impl BranchManager {
             new_event.id = Uuid::new_v4().to_string();
             self.storage.store_event(&new_event)?;
         }
-        
+
         Ok(())
     }
 
@@ -137,4 +149,4 @@ impl BranchTimeline {
             None
         }
     }
-} 
+}
