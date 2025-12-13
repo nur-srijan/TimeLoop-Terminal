@@ -115,11 +115,13 @@ impl FileWatcher {
                         let should_process = match &event {
                             notify::Event { paths, .. } => {
                                 paths.iter().all(|path| {
-                                    let ignore_patterns = ignore_patterns.clone();
+                                    // Optimization: Calculate path string once for all pattern checks
+                                    // and avoid cloning the ignore_patterns vector
+                                    let path_str = path.to_string_lossy();
+
                                     !ignore_patterns.iter().any(|pattern| {
                                         if pattern.contains('*') {
                                             // Simple glob matching
-                                            let path_str = path.to_string_lossy();
                                             if pattern == "*" {
                                                 return true;
                                             }
@@ -133,7 +135,7 @@ impl FileWatcher {
                                             }
                                             false
                                         } else {
-                                            path.to_string_lossy().contains(pattern)
+                                            path_str.contains(pattern)
                                         }
                                     })
                                 })
