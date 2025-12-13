@@ -2,6 +2,7 @@ use crate::storage::Storage;
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use sha2::{Digest, Sha256};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
