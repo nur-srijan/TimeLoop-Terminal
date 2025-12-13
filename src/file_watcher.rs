@@ -55,8 +55,17 @@ impl FileWatcher {
                 if self.matches_glob(&path_str, pattern) {
                     return true;
                 }
-            } else if path_str.contains(pattern) {
-                return true;
+            } else {
+                // Exact path component matching
+                // Check if the pattern matches a path component or the end of the path
+                // This prevents "target" from matching "src/targets/file.rs"
+                for component in path.components() {
+                    if let Some(comp_str) = component.as_os_str().to_str() {
+                        if comp_str == pattern {
+                            return true;
+                        }
+                    }
+                }
             }
         }
         

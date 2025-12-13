@@ -277,22 +277,22 @@ impl GpuRenderer {
                         format: VertexFormat::Float32x2,
                     },
                     VertexAttribute {
-                        offset: std::mem::size_of::<[f32; 4]>() as u64,
+                        offset: 16,
                         shader_location: 3,
                         format: VertexFormat::Float32x4,
                     },
                     VertexAttribute {
-                        offset: std::mem::size_of::<[f32; 6]>() as u64,
+                        offset: 32,
                         shader_location: 4,
                         format: VertexFormat::Uint32,
                     },
                     VertexAttribute {
-                        offset: std::mem::size_of::<[f32; 6]>() as u64 + 4,
+                        offset: 36,
                         shader_location: 5,
                         format: VertexFormat::Uint16x2,
                     },
                     VertexAttribute {
-                        offset: std::mem::size_of::<[f32; 6]>() as u64 + 8,
+                        offset: 40,
                         shader_location: 6,
                         format: VertexFormat::Float32,
                     },
