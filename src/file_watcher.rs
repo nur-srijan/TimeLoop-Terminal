@@ -46,30 +46,30 @@ impl FileWatcher {
         self.ignore_patterns.push(pattern);
     }
 
-    pub fn should_ignore(&self, path: &std::path::Path) -> bool {
-        let path_str = path.to_string_lossy();
-        
-        for pattern in &self.ignore_patterns {
-            if pattern.contains('*') {
-                // Simple glob pattern matching
-                if self.matches_glob(&path_str, pattern) {
-                    return true;
-                }
-            } else {
-                // Exact path component matching
-                // Check if the pattern matches a path component or the end of the path
-                // This prevents "target" from matching "src/targets/file.rs"
-                for component in path.components() {
-                    if let Some(comp_str) = component.as_os_str().to_str() {
-                        if comp_str == pattern {
-                            return true;
-                        }
+    fn should_ignore(&self, path: &Path, ignore_patterns: &[String]) -> bool {
+        let path_str = path.to_string_lossy().to_string();
+        ignore_patterns.iter().any(|pattern| {
+            self.is_path_ignored_by_single_pattern(path, &path_str, pattern)
+        })
+    }
+
+    // New helper function to encapsulate the ignore logic for a single pattern
+    fn is_path_ignored_by_single_pattern(&self, path: &Path, path_str: &str, pattern: &str) -> bool {
+        if pattern.contains('*') {
+            self.matches_glob(path_str, pattern)
+        } else {
+            // Exact path component matching
+            // Check if the pattern matches a path component or the end of the path
+            // This prevents "target" from matching "src/targets/file.rs"
+            for component in path.components() {
+                if let Some(comp_str) = component.as_os_str().to_str() {
+                    if comp_str == pattern {
+                        return true;
                     }
                 }
             }
+            false
         }
-        
-        false
     }
 
     fn matches_glob(&self, path: &str, pattern: &str) -> bool {
