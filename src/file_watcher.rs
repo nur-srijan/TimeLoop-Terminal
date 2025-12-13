@@ -116,24 +116,15 @@ impl FileWatcher {
                     Ok(Ok(event)) => {
                         // Filter out ignored files
                         let notify::Event { paths, .. } = &event;
+                        // Assuming `self` (FileWatcher instance) is available and `self.ignore_patterns` is `Arc<Vec<String>>`
+                        let file_watcher_clone = self.clone(); // Or Arc::clone(&self) if self is Arc<FileWatcher>
+                        let ignore_patterns_arc = self.ignore_patterns.clone(); // Capture the Arc for the closure
+                        
                         let should_process = paths.iter().all(|path| {
-                            let ignore_patterns = ignore_patterns.clone();
-                            !ignore_patterns.iter().any(|pattern| {
-                                if pattern.contains('*') {
-                                    // Simple glob matching
-                                    let path_str = path.to_string_lossy();
-                                    if pattern == "*" { return true; }
-                                    if pattern.starts_with("*.") {
-                                        let ext = &pattern[1..];
-                                        return path_str.ends_with(ext);
-                                    }
-                                    if let Some(prefix) = pattern.strip_suffix("*") {
-                                        return path_str.starts_with(prefix);
-                                    }
-                                    false
-                                } else {
-                                    path.to_string_lossy().contains(pattern)
-                                }
+                            let path_str = path.to_string_lossy().to_string();
+                            let patterns = ignore_patterns_arc.iter(); // Dereference Arc to get Vec<String> reference
+                            !patterns.any(|pattern| {
+                                file_watcher_clone.is_path_ignored_by_single_pattern(path, &path_str, pattern)
                             })
                         });
                         
