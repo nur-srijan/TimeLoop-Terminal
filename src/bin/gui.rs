@@ -69,7 +69,11 @@ impl eframe::App for TimeLoopGui {
                 }
             }
             ui.add_space(8.0);
-            if ui.button("Refresh").clicked() {
+            if ui
+                .button("Refresh")
+                .on_hover_text("Reload the list of sessions")
+                .clicked()
+            {
                 if let Ok(sm) = SessionManager::new() {
                     if let Ok(list) = sm.list_sessions() {
                         self.sessions = list;
@@ -93,14 +97,20 @@ impl eframe::App for TimeLoopGui {
                     ui.horizontal(|ui| {
                         if ui
                             .button(if self.playing { "Pause" } else { "Play" })
+                            .on_hover_text("Start or pause session playback")
                             .clicked()
                         {
                             self.playing = !self.playing;
                         }
-                        if ui.button("Step +1s").clicked() {
+                        if ui
+                            .button("Step +1s")
+                            .on_hover_text("Advance playback by 1 second")
+                            .clicked()
+                        {
                             self.position_ms += 1000;
                         }
-                        ui.add(egui::Slider::new(&mut self.speed, 0.25..=4.0).text("Speed"));
+                        ui.add(egui::Slider::new(&mut self.speed, 0.25..=4.0).text("Speed"))
+                            .on_hover_text("Adjust playback speed (0.25x to 4.0x)");
                     });
 
                     ui.add_space(8.0);
@@ -112,10 +122,12 @@ impl eframe::App for TimeLoopGui {
                     } else {
                         0.0
                     };
-                    let (rect, _response) = ui.allocate_exact_size(
+                    let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 30.0),
                         egui::Sense::hover(),
                     );
+                    response.on_hover_text(format!("Playback progress: {:.0}%", fraction * 100.0));
+
                     ui.painter()
                         .rect_filled(rect, 4.0, egui::Color32::DARK_GRAY);
                     let filled = egui::Rect::from_min_max(
@@ -142,7 +154,7 @@ impl eframe::App for TimeLoopGui {
                     ui.label("No replay summary available for this session.");
                 }
             } else {
-                ui.label("No session selected.");
+                ui.label("Select a session from the left sidebar to view details.");
             }
         });
     }
