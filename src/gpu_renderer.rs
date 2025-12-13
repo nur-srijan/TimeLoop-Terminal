@@ -267,32 +267,32 @@ impl GpuRenderer {
                 step_mode: VertexStepMode::Instance,
                 attributes: &[
                     VertexAttribute {
-                        offset: 0,
+                        offset: std::mem::offset_of!(GlyphInstance, pos) as u64,
                         shader_location: 1,
                         format: VertexFormat::Float32x2,
                     },
                     VertexAttribute {
-                        offset: std::mem::size_of::<[f32; 2]>() as u64,
+                        offset: std::mem::offset_of!(GlyphInstance, size) as u64,
                         shader_location: 2,
                         format: VertexFormat::Float32x2,
                     },
                     VertexAttribute {
-                        offset: 16,
+                        offset: std::mem::offset_of!(GlyphInstance, uv_rect) as u64,
                         shader_location: 3,
                         format: VertexFormat::Float32x4,
                     },
                     VertexAttribute {
-                        offset: 32,
+                        offset: std::mem::offset_of!(GlyphInstance, fg_color) as u64,
                         shader_location: 4,
                         format: VertexFormat::Uint32,
                     },
                     VertexAttribute {
-                        offset: 36,
+                        offset: std::mem::offset_of!(GlyphInstance, flags) as u64,
                         shader_location: 5,
                         format: VertexFormat::Uint16x2,
                     },
                     VertexAttribute {
-                        offset: 40,
+                        offset: std::mem::offset_of!(GlyphInstance, time_created) as u64,
                         shader_location: 6,
                         format: VertexFormat::Float32,
                     },

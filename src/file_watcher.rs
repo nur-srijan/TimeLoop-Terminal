@@ -164,7 +164,7 @@ impl FileWatcher {
     }
 
     async fn process_file_event(&mut self, event: notify::Event) -> crate::Result<()> {
-        if let notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) = &event.kind {
+        if let notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) = event.kind {
             // Handle rename: expect 2 paths [old, new]
             if event.paths.len() == 2 {
                 let old_path = event.paths[0].to_string_lossy().to_string();
