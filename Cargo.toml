@@ -55,6 +55,7 @@ argon2 = "0.4"
 zeroize = "1.5"
 base64 = "0.21"
 regex = "1.11"
+sha2 = "0.10.9"
 
 [dev-dependencies]
 tokio-test = "0.4"
