@@ -78,22 +78,20 @@ fn should_ignore_path(path: &Path, ignore_patterns: &[IgnorePattern]) -> bool {
 
 impl FileWatcher {
     pub fn new(file_change_callback: FileChangeCallback) -> crate::Result<Self> {
-        let defaults = vec![
-            ".git".to_string(),
-            "target".to_string(),
-            "node_modules".to_string(),
-            ".DS_Store".to_string(),
-            "**/*.tmp".to_string(),
-            "**/*.log".to_string(),
+        let defaults: &[&str] = &[
+            ".git",
+            "target",
+            "node_modules",
+            ".DS_Store",
+            "**/*.tmp",
+            "**/*.log",
         ];
-
         let ignore_patterns = defaults.iter().map(|s| parse_ignore_pattern(s)).collect();
-
         Ok(Self {
             file_change_callback,
             watched_paths: HashMap::new(),
             ignore_patterns,
-            raw_ignore_patterns: defaults,
+            raw_ignore_patterns: defaults.iter().map(|s| s.to_string()).collect(),
         })
     }
 
