@@ -1,13 +1,13 @@
-use std::time::Duration;
-use tokio::time::{sleep, Instant};
+use crate::{Event, EventType, FileChangeType, Storage};
+use crossterm::event::{self, Event as CEvent, KeyCode};
 use crossterm::{
-    terminal::{Clear, ClearType},
     style::{Color, Print, ResetColor, SetForegroundColor},
+    terminal::{Clear, ClearType},
     ExecutableCommand,
 };
 use std::io::Write;
-use crate::{Storage, Event, EventType, FileChangeType};
-use crossterm::event::{self, Event as CEvent, KeyCode};
+use std::time::Duration;
+use tokio::time::{sleep, Instant};
 
 pub struct ReplayEngine {
     storage: Storage,
@@ -25,13 +25,16 @@ impl ReplayEngine {
 
     pub async fn replay(&self, speed: f32) -> crate::Result<()> {
         let events = self.storage.get_events_for_session(&self.session_id)?;
-        
+
         if events.is_empty() {
             println!("No events found for session: {}", self.session_id);
             return Ok(());
         }
 
-        println!("🎥 Replaying session: {} at {}x speed", self.session_id, speed);
+        println!(
+            "🎥 Replaying session: {} at {}x speed",
+            self.session_id, speed
+        );
         println!("Controls: space=pause/resume, +/-=speed, q=quit");
         println!("{}", "─".repeat(60));
 
@@ -57,22 +60,34 @@ impl ReplayEngine {
                     if event::poll(Duration::from_millis(50))? {
                         if let CEvent::Key(key) = event::read()? {
                             match key.code {
-                                KeyCode::Char(' ') => { paused = !paused; }
-                                KeyCode::Char('+') => { current_speed *= 2.0; }
-                                KeyCode::Char('-') => { current_speed = (current_speed / 2.0).max(0.25); }
-                                KeyCode::Char('q') => { println!("\n⏹️  Quit replay"); return Ok(()); }
+                                KeyCode::Char(' ') => {
+                                    paused = !paused;
+                                }
+                                KeyCode::Char('+') => {
+                                    current_speed *= 2.0;
+                                }
+                                KeyCode::Char('-') => {
+                                    current_speed = (current_speed / 2.0).max(0.25);
+                                }
+                                KeyCode::Char('q') => {
+                                    println!("\n⏹️  Quit replay");
+                                    return Ok(());
+                                }
                                 _ => {}
                             }
                         }
                     }
-                    if paused { sleep(Duration::from_millis(50)).await; continue; }
+                    if paused {
+                        sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
                     sleep(Duration::from_millis(10)).await;
                 }
             }
 
             // Display the event
             self.display_event(event, i + 1, events.len())?;
-            
+
             last_timestamp = event.timestamp;
         }
 
@@ -80,22 +95,27 @@ impl ReplayEngine {
         Ok(())
     }
 
-    fn display_event(&self, event: &Event, event_num: usize, total_events: usize) -> crate::Result<()> {
+    fn display_event(
+        &self,
+        event: &Event,
+        event_num: usize,
+        total_events: usize,
+    ) -> crate::Result<()> {
         let mut stdout = std::io::stdout();
-        
+
         // Clear the current line
         stdout.execute(Clear(ClearType::CurrentLine))?;
-        
+
         // Show progress
         stdout.execute(SetForegroundColor(Color::Cyan))?;
         stdout.execute(Print(format!("[{}/{}] ", event_num, total_events)))?;
         stdout.execute(ResetColor)?;
-        
+
         // Show timestamp
         stdout.execute(SetForegroundColor(Color::Yellow))?;
         stdout.execute(Print(format!("{} ", event.timestamp.format("%H:%M:%S"))))?;
         stdout.execute(ResetColor)?;
-        
+
         match &event.event_type {
             EventType::KeyPress { key, .. } => {
                 stdout.execute(SetForegroundColor(Color::Green))?;
@@ -103,29 +123,41 @@ impl ReplayEngine {
                 stdout.execute(ResetColor)?;
                 stdout.execute(Print(format!("Key: {}", key)))?;
             }
-            EventType::Command { command, output, exit_code, working_directory, .. } => {
+            EventType::Command {
+                command,
+                output,
+                exit_code,
+                working_directory,
+                ..
+            } => {
                 stdout.execute(SetForegroundColor(Color::Blue))?;
                 stdout.execute(Print("💻 "))?;
                 stdout.execute(ResetColor)?;
                 stdout.execute(Print(format!("Command: {}", command)))?;
                 stdout.execute(Print("\n"))?;
-                
+
                 if !output.is_empty() {
                     stdout.execute(SetForegroundColor(Color::DarkGrey))?;
                     stdout.execute(Print("   Output: "))?;
                     stdout.execute(ResetColor)?;
                     stdout.execute(Print(output))?;
                 }
-                
+
                 stdout.execute(SetForegroundColor(Color::Magenta))?;
-                stdout.execute(Print(format!("   Exit: {}, Dir: {}", exit_code, working_directory)))?;
+                stdout.execute(Print(format!(
+                    "   Exit: {}, Dir: {}",
+                    exit_code, working_directory
+                )))?;
                 stdout.execute(ResetColor)?;
             }
-            EventType::FileChange { path, change_type, .. } => {
+            EventType::FileChange {
+                path, change_type, ..
+            } => {
                 stdout.execute(SetForegroundColor(Color::Red))?;
                 stdout.execute(Print("📁 "))?;
                 stdout.execute(ResetColor)?;
-                stdout.execute(Print(format!("File {}: {}", 
+                stdout.execute(Print(format!(
+                    "File {}: {}",
                     match change_type {
                         FileChangeType::Created => "created",
                         FileChangeType::Modified => "modified",
@@ -135,11 +167,16 @@ impl ReplayEngine {
                     path
                 )))?;
             }
-            EventType::TerminalState { cursor_position, screen_size, .. } => {
+            EventType::TerminalState {
+                cursor_position,
+                screen_size,
+                ..
+            } => {
                 stdout.execute(SetForegroundColor(Color::DarkGrey))?;
                 stdout.execute(Print("🖥️  "))?;
                 stdout.execute(ResetColor)?;
-                stdout.execute(Print(format!("Terminal: {}x{}, cursor at {:?}", 
+                stdout.execute(Print(format!(
+                    "Terminal: {}x{}, cursor at {:?}",
                     screen_size.0, screen_size.1, cursor_position
                 )))?;
             }
@@ -150,23 +187,31 @@ impl ReplayEngine {
                 stdout.execute(Print(format!("Session: {}", name)))?;
             }
         }
-        
+
         stdout.execute(Print("\n"))?;
         stdout.flush()?;
         Ok(())
     }
 
-    pub async fn replay_range(&self, start_time: chrono::DateTime<chrono::Utc>, end_time: chrono::DateTime<chrono::Utc>, speed: f32) -> crate::Result<()> {
-        let events = self.storage.get_events_in_range(&self.session_id, start_time, end_time)?;
-        
+    pub async fn replay_range(
+        &self,
+        start_time: chrono::DateTime<chrono::Utc>,
+        end_time: chrono::DateTime<chrono::Utc>,
+        speed: f32,
+    ) -> crate::Result<()> {
+        let events = self
+            .storage
+            .get_events_in_range(&self.session_id, start_time, end_time)?;
+
         if events.is_empty() {
             println!("No events found in the specified time range");
             return Ok(());
         }
 
-        println!("🎥 Replaying session range: {} to {} at {}x speed", 
-            start_time.format("%H:%M:%S"), 
-            end_time.format("%H:%M:%S"), 
+        println!(
+            "🎥 Replaying session range: {} to {} at {}x speed",
+            start_time.format("%H:%M:%S"),
+            end_time.format("%H:%M:%S"),
             speed
         );
 
@@ -194,7 +239,7 @@ impl ReplayEngine {
 
     pub fn get_session_summary(&self) -> crate::Result<ReplaySummary> {
         let events = self.storage.get_events_for_session(&self.session_id)?;
-        
+
         let mut commands = 0;
         let mut key_presses = 0;
         let mut file_changes = 0;
@@ -230,4 +275,4 @@ pub struct ReplaySummary {
     pub key_presses: usize,
     pub file_changes: usize,
     pub duration: chrono::Duration,
-} 
+}

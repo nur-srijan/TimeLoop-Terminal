@@ -1,7 +1,7 @@
 #![cfg(feature = "gui")]
 
 use eframe::egui;
-use timeloop_terminal::{SessionManager, ReplayEngine};
+use timeloop_terminal::{ReplayEngine, SessionManager};
 
 // Enhanced GUI app with comprehensive features
 struct TimeLoopGui {

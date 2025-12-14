@@ -1,7 +1,7 @@
-use serde::{Serialize, Deserialize};
-use chrono::{DateTime, Utc, Duration};
+use crate::{EventType, Storage, TimeLoopError};
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::{Storage, EventType, TimeLoopError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -49,16 +49,21 @@ impl SessionManager {
             parent_session_id: None,
             branch_name: None,
         };
-        
+
         self.storage.store_session(&session)?;
         Ok(session_id)
     }
 
-    pub fn create_branch(&mut self, parent_session_id: &str, branch_name: &str) -> crate::Result<String> {
+    pub fn create_branch(
+        &mut self,
+        parent_session_id: &str,
+        branch_name: &str,
+    ) -> crate::Result<String> {
         // Verify parent session exists
-        let parent_session = self.get_session(parent_session_id)?
+        let parent_session = self
+            .get_session(parent_session_id)?
             .ok_or_else(|| TimeLoopError::SessionNotFound(parent_session_id.to_string()))?;
-        
+
         let branch_id = Uuid::new_v4().to_string();
         let branch_session = Session {
             id: branch_id.clone(),
@@ -68,7 +73,7 @@ impl SessionManager {
             parent_session_id: Some(parent_session_id.to_string()),
             branch_name: Some(branch_name.to_string()),
         };
-        
+
         self.storage.store_session(&branch_session)?;
         Ok(branch_id)
     }
@@ -90,15 +95,16 @@ impl SessionManager {
     }
 
     pub fn get_session_summary(&self, session_id: &str) -> crate::Result<SessionSummary> {
-        let session = self.get_session(session_id)?
+        let session = self
+            .get_session(session_id)?
             .ok_or_else(|| TimeLoopError::SessionNotFound(session_id.to_string()))?;
-        
+
         let events = self.storage.get_events_for_session(session_id)?;
-        
+
         let mut commands_executed = 0;
         let mut files_modified = 0;
         let mut last_command = String::new();
-        
+
         for event in &events {
             match &event.event_type {
                 EventType::Command { command, .. } => {
@@ -111,13 +117,13 @@ impl SessionManager {
                 _ => {}
             }
         }
-        
+
         let duration = if let Some(ended_at) = session.ended_at {
             ended_at - session.created_at
         } else {
             Utc::now() - session.created_at
         };
-        
+
         Ok(SessionSummary {
             session_id: session.id,
             name: session.name,
@@ -138,23 +144,27 @@ impl SessionManager {
         let sessions = self.list_sessions()?;
         let mut tree = Vec::new();
         let mut session_map = std::collections::HashMap::new();
-        
+
         // Create a map of sessions by ID
         for session in &sessions {
             session_map.insert(&session.id, session);
         }
-        
+
         // Build the tree
         for session in &sessions {
             if session.parent_session_id.is_none() {
                 tree.push(self.build_session_node(session, &session_map));
             }
         }
-        
+
         Ok(tree)
     }
 
-    fn build_session_node(&self, session: &Session, session_map: &std::collections::HashMap<&String, &Session>) -> SessionNode {
+    fn build_session_node(
+        &self,
+        session: &Session,
+        session_map: &std::collections::HashMap<&String, &Session>,
+    ) -> SessionNode {
         let mut children = Vec::new();
         
         for other_session in session_map.values() {
@@ -162,7 +172,7 @@ impl SessionManager {
                 children.push(self.build_session_node(other_session, session_map));
             }
         }
-        
+
         SessionNode {
             session: session.clone(),
             children,
@@ -174,4 +184,4 @@ impl SessionManager {
 pub struct SessionNode {
     pub session: Session,
     pub children: Vec<SessionNode>,
-} 
+}

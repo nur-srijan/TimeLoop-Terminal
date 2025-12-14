@@ -1,15 +1,17 @@
 use std::path::{PathBuf, Path};
+use notify::{recommended_watcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
-use notify::{Watcher, RecursiveMode, recommended_watcher};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use glob::{Pattern, MatchOptions};
 
-use tokio::sync::mpsc as tokio_mpsc;
 use crate::FileChangeType;
 use std::sync::Arc;
+use tokio::sync::mpsc as tokio_mpsc;
 use tokio::sync::Mutex;
 
-pub type FileChangeCallback = Arc<Mutex<dyn Fn(&str, FileChangeType) -> crate::Result<()> + Send + Sync>>;
+pub type FileChangeCallback =
+    Arc<Mutex<dyn Fn(&str, FileChangeType) -> crate::Result<()> + Send + Sync>>;
 
 #[derive(Clone)]
 pub enum IgnorePattern {
@@ -119,24 +121,28 @@ impl FileWatcher {
 
     pub async fn start_watching(&mut self) -> crate::Result<()> {
         let (tx, mut rx) = tokio_mpsc::channel(100);
-        
+
         // Spawn the file watcher in a separate thread
         let watched_paths = self.watched_paths.clone();
         let ignore_patterns = self.ignore_patterns.clone();
-        
+
         std::thread::spawn(move || {
             let (notify_tx, notify_rx) = mpsc::channel();
-            
+
             let mut watcher = recommended_watcher(notify_tx).unwrap();
-            
+
             // Watch all registered paths
             for (path, recursive) in &watched_paths {
-                let mode = if *recursive { RecursiveMode::Recursive } else { RecursiveMode::NonRecursive };
+                let mode = if *recursive {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                };
                 if let Err(e) = watcher.watch(path, mode) {
                     eprintln!("Failed to watch path {:?}: {}", path, e);
                 }
             }
-            
+
             // Process file system events
             loop {
                 match notify_rx.recv() {
@@ -165,12 +171,12 @@ impl FileWatcher {
                 }
             }
         });
-        
+
         // Process events in the async context
         while let Some(event) = rx.recv().await {
             self.process_file_event(event).await?;
         }
-        
+
         Ok(())
     }
 
@@ -204,17 +210,31 @@ impl FileWatcher {
                 notify::EventKind::Modify(_) => FileChangeType::Modified,
                 _ => continue, // Skip other event types
             };
-            
+
             let callback = self.file_change_callback.clone();
             let path_str = path.to_string_lossy().to_string();
 
             tokio::spawn(async move {
-                if let Err(e) = callback.lock().await(&path_str, change_type) {
+                let change = match event_kind {
+                    notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
+                        // For rename, try to read old path from first element if present
+                        // Since we're inside spawned task, we only have current path; this is a best-effort placeholder
+                        if let FileChangeType::Renamed { .. } = &change_type {
+                            FileChangeType::Renamed {
+                                old_path: String::from(""),
+                            }
+                        } else {
+                            change_type
+                        }
+                    }
+                    _ => change_type,
+                };
+                if let Err(e) = callback.lock().await(&path_str, change) {
                     eprintln!("Error in file change callback: {}", e);
                 }
             });
         }
-        
+
         Ok(())
     }
 
@@ -233,22 +253,25 @@ mod tests {
     use crate::events::EventRecorder;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use tokio::sync::Mutex;
     use tempfile::TempDir;
+    use tokio::sync::Mutex;
 
     #[test]
     fn test_ignore_patterns() {
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path().join("events.db");
         let storage = crate::storage::Storage::with_path(db_path.to_str().unwrap()).unwrap();
-        let _event_recorder = Arc::new(Mutex::new(EventRecorder::with_storage("test-session", storage)));
-        
+        let _event_recorder = Arc::new(Mutex::new(EventRecorder::with_storage(
+            "test-session",
+            storage,
+        )));
+
         // Create a callback function that matches the expected signature
-        let callback: FileChangeCallback = Arc::new(Mutex::new(move |_path: &str, _change_type: FileChangeType| {
-            Ok(())
-        }));
+        let callback: FileChangeCallback = Arc::new(Mutex::new(
+            move |_path: &str, _change_type: FileChangeType| Ok(()),
+        ));
         let mut file_watcher = FileWatcher::new(callback).unwrap();
-        
+
         // Test basic ignore patterns
         assert!(file_watcher.should_ignore(&PathBuf::from(".git/config")));
         assert!(file_watcher.should_ignore(&PathBuf::from("target/debug/app")));

@@ -63,6 +63,7 @@ zeroize = "1.5"
 base64 = "0.21"
 regex = "1.11"
 glob = "0.3.3"
+sha2 = "0.10.9"
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -83,3 +84,8 @@ default = []
 ai = ["dep:reqwest"]
 gui = ["dep:eframe"]
 all = ["dep:reqwest", "dep:eframe"]
+
+[[bin]]
+name = "gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]

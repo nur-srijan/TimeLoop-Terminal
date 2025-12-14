@@ -12,7 +12,7 @@ If you discover a security vulnerability in TimeLoop Terminal, please follow the
 
 1. **Do not disclose the vulnerability publicly.** Refrain from posting details on public forums, issue trackers, or social media until the issue is resolved.
 2. **Contact us directly:**
-   - Email: security@timeloop-terminal.example.com
+   - Email: nursrijan1421@gmail.com
    - Alternatively, you may use our [GitHub Security Advisories](https://github.com/nur-srijan/TimeLoop-Terminal/security/advisories) if applicable.
 3. Provide as much detail as possible about the vulnerability, including:
    - Steps to reproduce the issue

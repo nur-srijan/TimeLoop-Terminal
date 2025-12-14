@@ -1,9 +1,11 @@
+#[cfg(feature = "ai")]
+pub mod ai;
+pub mod branch;
 pub mod error;
 pub mod events;
-pub mod session;
-pub mod terminal;
+pub mod file_watcher;
 pub mod replay;
-pub mod branch;
+pub mod session;
 pub mod storage;
 pub mod file_watcher;
 pub mod gpu_renderer;
@@ -11,12 +13,11 @@ pub mod gpu_terminal;
 #[cfg(feature = "ai")]
 pub mod ai;
 
+pub use branch::{BranchManager, TimelineBranch};
 pub use error::TimeLoopError;
-pub use session::{SessionManager, Session, SessionSummary};
-pub use terminal::TerminalEmulator;
-pub use events::{EventRecorder, Event, EventType, FileChangeType};
+pub use events::{Event, EventRecorder, EventType, FileChangeType};
 pub use replay::ReplayEngine;
-pub use branch::{TimelineBranch, BranchManager};
+pub use session::{Session, SessionManager, SessionSummary};
 pub use storage::Storage;
 pub use gpu_renderer::{GpuRenderer, GlyphInstance, Uniforms};
 pub use gpu_terminal::GpuTerminalEmulator;
@@ -38,7 +39,7 @@ mod tests {
         let mut session_manager = SessionManager::with_storage(storage);
         let session_id = session_manager.create_session("test-session").unwrap();
         assert!(!session_id.is_empty());
-        
+
         let session = session_manager.get_session(&session_id).unwrap().unwrap();
         assert_eq!(session.name, "test-session");
         assert_eq!(session.id, session_id);
@@ -50,7 +51,9 @@ mod tests {
         let db_path = tmp_dir.path().join("events.db");
         let storage = Storage::with_path(db_path.to_str().unwrap()).unwrap();
         let event_recorder = EventRecorder::with_storage("test-session", storage);
-        let events = event_recorder.get_events_for_session("test-session").unwrap();
+        let events = event_recorder
+            .get_events_for_session("test-session")
+            .unwrap();
         assert_eq!(events.len(), 0); // Should be empty initially
     }
 
@@ -67,9 +70,9 @@ mod tests {
             parent_session_id: None,
             branch_name: None,
         };
-        
+
         storage.store_session(&session).unwrap();
         let retrieved = storage.get_session("test-id").unwrap().unwrap();
         assert_eq!(retrieved.name, session.name);
     }
-} 
+}
