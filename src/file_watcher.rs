@@ -1,7 +1,6 @@
 use std::path::{PathBuf, Path};
 use notify::{recommended_watcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::mpsc;
 use glob::{Pattern, MatchOptions};
 
@@ -197,7 +196,7 @@ impl FileWatcher {
             }
         }
 
-        for path in event.paths {
+        for path in &event.paths {
             let change_type = match event.kind {
                 notify::EventKind::Create(_) => FileChangeType::Created,
                 notify::EventKind::Remove(_) => FileChangeType::Deleted,
@@ -214,6 +213,7 @@ impl FileWatcher {
             let callback = self.file_change_callback.clone();
             let path_str = path.to_string_lossy().to_string();
 
+            let event_kind = event.kind.clone();
             tokio::spawn(async move {
                 let change = match event_kind {
                     notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
