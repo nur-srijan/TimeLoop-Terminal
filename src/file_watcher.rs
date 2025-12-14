@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::collections::HashMap;
 use notify::{Watcher, RecursiveMode, recommended_watcher};
 use std::sync::mpsc;
+use glob::{Pattern, MatchOptions};
 
 use tokio::sync::mpsc as tokio_mpsc;
 use crate::FileChangeType;
@@ -10,25 +11,90 @@ use tokio::sync::Mutex;
 
 pub type FileChangeCallback = Arc<Mutex<dyn Fn(&str, FileChangeType) -> crate::Result<()> + Send + Sync>>;
 
+#[derive(Clone)]
+pub enum IgnorePattern {
+    Glob(Pattern),
+    Exact(String),
+}
+
 pub struct FileWatcher {
     file_change_callback: FileChangeCallback,
     watched_paths: HashMap<PathBuf, bool>,
-    ignore_patterns: Vec<String>,
+    ignore_patterns: Vec<IgnorePattern>,
+    // Keep a copy of raw patterns if needed, but we can also just expose the behavior.
+    // For `get_ignore_patterns`, we will need to reconstruct strings or return this list.
+    // To match existing API, let's keep the raw strings separate or derive them.
+    // Given the previous code just returned `&Vec<String>`, let's store `raw_ignore_patterns` too.
+    raw_ignore_patterns: Vec<String>,
+}
+
+// Helper to determine if we should use Glob or Exact
+fn parse_ignore_pattern(pattern: &str) -> IgnorePattern {
+    if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+        match Pattern::new(pattern) {
+            Ok(p) => IgnorePattern::Glob(p),
+            Err(e) => {
+                eprintln!("Warning: Invalid glob pattern '{}': {}. Falling back to exact match.", pattern, e);
+                IgnorePattern::Exact(pattern.to_string())
+            }
+        }
+    } else {
+        IgnorePattern::Exact(pattern.to_string())
+    }
+}
+
+// Static helper to avoid code duplication and allow usage without &self (e.g. in threads)
+fn should_ignore_path(path: &Path, ignore_patterns: &[IgnorePattern]) -> bool {
+    let path_str = path.to_string_lossy();
+    // Normalize path separators to forward slashes for glob matching (Windows compatibility)
+    let normalized_path = if std::path::MAIN_SEPARATOR == '\\' {
+        path_str.replace('\\', "/")
+    } else {
+        path_str.into_owned()
+    };
+
+    let match_options = MatchOptions {
+        case_sensitive: true, // Default
+        require_literal_separator: true, // Do not allow * to match /
+        require_literal_leading_dot: false, // Default
+    };
+
+    ignore_patterns.iter().any(|pattern| {
+        match pattern {
+            IgnorePattern::Glob(p) => p.matches_with(&normalized_path, match_options),
+            IgnorePattern::Exact(p) => {
+                 // Exact path component matching
+                // Check if the pattern matches a path component or the end of the path
+                // This prevents "target" from matching "src/targets/file.rs"
+                for component in path.components() {
+                    if let Some(comp_str) = component.as_os_str().to_str() {
+                        if comp_str == p {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+        }
+    })
 }
 
 impl FileWatcher {
     pub fn new(file_change_callback: FileChangeCallback) -> crate::Result<Self> {
+        let defaults: &[&str] = &[
+            ".git",
+            "target",
+            "node_modules",
+            ".DS_Store",
+            "**/*.tmp",
+            "**/*.log",
+        ];
+        let ignore_patterns = defaults.iter().map(|s| parse_ignore_pattern(s)).collect();
         Ok(Self {
             file_change_callback,
             watched_paths: HashMap::new(),
-            ignore_patterns: vec![
-                ".git".to_string(),
-                "target".to_string(),
-                "node_modules".to_string(),
-                ".DS_Store".to_string(),
-                "*.tmp".to_string(),
-                "*.log".to_string(),
-            ],
+            ignore_patterns,
+            raw_ignore_patterns: defaults.iter().map(|s| s.to_string()).collect(),
         })
     }
 
@@ -43,42 +109,12 @@ impl FileWatcher {
     }
 
     pub fn add_ignore_pattern(&mut self, pattern: String) {
-        self.ignore_patterns.push(pattern);
+        self.ignore_patterns.push(parse_ignore_pattern(&pattern));
+        self.raw_ignore_patterns.push(pattern);
     }
 
-    pub fn should_ignore(&self, path: &std::path::Path) -> bool {
-        let path_str = path.to_string_lossy();
-        
-        for pattern in &self.ignore_patterns {
-            if pattern.contains('*') {
-                // Simple glob pattern matching
-                if self.matches_glob(&path_str, pattern) {
-                    return true;
-                }
-            } else if path_str.contains(pattern) {
-                return true;
-            }
-        }
-        
-        false
-    }
-
-    fn matches_glob(&self, path: &str, pattern: &str) -> bool {
-        // Simple glob matching - can be enhanced with a proper glob library
-        if pattern == "*" {
-            return true;
-        }
-        
-        if pattern.starts_with("*.") {
-            let ext = &pattern[1..];
-            return path.ends_with(ext);
-        }
-        
-        if let Some(prefix) = pattern.strip_suffix("*") {
-            return path.starts_with(prefix);
-        }
-        
-        path == pattern
+    pub fn should_ignore(&self, path: &Path) -> bool {
+        should_ignore_path(path, &self.ignore_patterns)
     }
 
     pub async fn start_watching(&mut self) -> crate::Result<()> {
@@ -107,25 +143,9 @@ impl FileWatcher {
                     Ok(Ok(event)) => {
                         // Filter out ignored files
                         let notify::Event { paths, .. } = &event;
+                        
                         let should_process = paths.iter().all(|path| {
-                            let ignore_patterns = ignore_patterns.clone();
-                            !ignore_patterns.iter().any(|pattern| {
-                                if pattern.contains('*') {
-                                    // Simple glob matching
-                                    let path_str = path.to_string_lossy();
-                                    if pattern == "*" { return true; }
-                                    if pattern.starts_with("*.") {
-                                        let ext = &pattern[1..];
-                                        return path_str.ends_with(ext);
-                                    }
-                                    if let Some(prefix) = pattern.strip_suffix("*") {
-                                        return path_str.starts_with(prefix);
-                                    }
-                                    false
-                                } else {
-                                    path.to_string_lossy().contains(pattern)
-                                }
-                            })
+                            !should_ignore_path(path, &ignore_patterns)
                         });
                         
                         if should_process {
@@ -178,6 +198,7 @@ impl FileWatcher {
                 notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
                     // For rename events, if not 2 paths, we can't do much or treat as modify/create
                     // Fallback if we only got 1 path for some reason (rare for Rename)
+                    eprintln!("Warning: Received rename event with {} paths, expected 2. Fallback to rename with empty old_path.", event.paths.len());
                     FileChangeType::Renamed { old_path: String::new() }
                 }
                 notify::EventKind::Modify(_) => FileChangeType::Modified,
@@ -202,7 +223,7 @@ impl FileWatcher {
     }
 
     pub fn get_ignore_patterns(&self) -> &Vec<String> {
-        &self.ignore_patterns
+        &self.raw_ignore_patterns
     }
 }
 
@@ -232,11 +253,22 @@ mod tests {
         assert!(file_watcher.should_ignore(&PathBuf::from(".git/config")));
         assert!(file_watcher.should_ignore(&PathBuf::from("target/debug/app")));
         assert!(file_watcher.should_ignore(&PathBuf::from("node_modules/lodash")));
-        assert!(file_watcher.should_ignore(&PathBuf::from("app.log")));
-        
-        // Test glob patterns
-        file_watcher.add_ignore_pattern("*.tmp".to_string());
+        // Test default globs
         assert!(file_watcher.should_ignore(&PathBuf::from("temp.tmp")));
+        assert!(file_watcher.should_ignore(&PathBuf::from("src/temp.tmp"))); // Recursive due to **
         assert!(!file_watcher.should_ignore(&PathBuf::from("temp.txt")));
+
+        // Test glob patterns added manually
+        file_watcher.add_ignore_pattern("*.custom".to_string()); // Non recursive because required literal separator
+        assert!(file_watcher.should_ignore(&PathBuf::from("file.custom")));
+        assert!(!file_watcher.should_ignore(&PathBuf::from("src/file.custom"))); // Should NOT match now
+
+        file_watcher.add_ignore_pattern("**/*.recursive".to_string());
+        assert!(file_watcher.should_ignore(&PathBuf::from("src/test.recursive")));
+
+        // Test more complex glob patterns supported by glob crate
+        file_watcher.add_ignore_pattern("src/**/*.rs.bk".to_string());
+        assert!(file_watcher.should_ignore(&PathBuf::from("src/utils/file.rs.bk")));
+        assert!(!file_watcher.should_ignore(&PathBuf::from("src/utils/file.rs")));
     }
 }
