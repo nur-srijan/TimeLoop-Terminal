@@ -33,7 +33,10 @@ fn parse_ignore_pattern(pattern: &str) -> IgnorePattern {
     if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
         match Pattern::new(pattern) {
             Ok(p) => IgnorePattern::Glob(p),
-            Err(_) => IgnorePattern::Exact(pattern.to_string()), // Fallback to exact if invalid glob
+            Err(e) => {
+                eprintln!("Warning: Invalid glob pattern '{}': {}. Falling back to exact match.", pattern, e);
+                IgnorePattern::Exact(pattern.to_string())
+            }
         }
     } else {
         IgnorePattern::Exact(pattern.to_string())
@@ -195,6 +198,7 @@ impl FileWatcher {
                 notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
                     // For rename events, if not 2 paths, we can't do much or treat as modify/create
                     // Fallback if we only got 1 path for some reason (rare for Rename)
+                    eprintln!("Warning: Received rename event with {} paths, expected 2. Fallback to rename with empty old_path.", event.paths.len());
                     FileChangeType::Renamed { old_path: String::new() }
                 }
                 notify::EventKind::Modify(_) => FileChangeType::Modified,
