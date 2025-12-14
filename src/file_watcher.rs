@@ -2,6 +2,7 @@ use std::path::{PathBuf, Path};
 use std::collections::HashMap;
 use notify::{Watcher, RecursiveMode, recommended_watcher};
 use std::sync::mpsc;
+use glob::{Pattern, MatchOptions};
 
 use tokio::sync::mpsc as tokio_mpsc;
 use crate::FileChangeType;
@@ -10,70 +11,89 @@ use tokio::sync::Mutex;
 
 pub type FileChangeCallback = Arc<Mutex<dyn Fn(&str, FileChangeType) -> crate::Result<()> + Send + Sync>>;
 
+#[derive(Clone)]
+pub enum IgnorePattern {
+    Glob(Pattern),
+    Exact(String),
+}
+
 pub struct FileWatcher {
     file_change_callback: FileChangeCallback,
     watched_paths: HashMap<PathBuf, bool>,
-    ignore_patterns: Vec<String>,
+    ignore_patterns: Vec<IgnorePattern>,
+    // Keep a copy of raw patterns if needed, but we can also just expose the behavior.
+    // For `get_ignore_patterns`, we will need to reconstruct strings or return this list.
+    // To match existing API, let's keep the raw strings separate or derive them.
+    // Given the previous code just returned `&Vec<String>`, let's store `raw_ignore_patterns` too.
+    raw_ignore_patterns: Vec<String>,
 }
 
-// Helper function to encapsulate the ignore logic for a single pattern
-fn is_path_ignored_by_single_pattern(path: &Path, path_str: &str, pattern: &str) -> bool {
-    if pattern.contains('*') {
-        matches_glob(path_str, pattern)
-    } else {
-        // Exact path component matching
-        // Check if the pattern matches a path component or the end of the path
-        // This prevents "target" from matching "src/targets/file.rs"
-        for component in path.components() {
-            if let Some(comp_str) = component.as_os_str().to_str() {
-                if comp_str == pattern {
-                    return true;
-                }
-            }
+// Helper to determine if we should use Glob or Exact
+fn parse_ignore_pattern(pattern: &str) -> IgnorePattern {
+    if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+        match Pattern::new(pattern) {
+            Ok(p) => IgnorePattern::Glob(p),
+            Err(_) => IgnorePattern::Exact(pattern.to_string()), // Fallback to exact if invalid glob
         }
-        false
+    } else {
+        IgnorePattern::Exact(pattern.to_string())
     }
-}
-
-fn matches_glob(path: &str, pattern: &str) -> bool {
-    // Simple glob matching - can be enhanced with a proper glob library
-    if pattern == "*" {
-        return true;
-    }
-
-    if pattern.starts_with("*.") {
-        let ext = &pattern[1..];
-        return path.ends_with(ext);
-    }
-
-    if let Some(prefix) = pattern.strip_suffix("*") {
-        return path.starts_with(prefix);
-    }
-
-    path == pattern
 }
 
 // Static helper to avoid code duplication and allow usage without &self (e.g. in threads)
-fn should_ignore_path(path: &Path, ignore_patterns: &[String]) -> bool {
-    let path_str = path.to_string_lossy().to_string();
+fn should_ignore_path(path: &Path, ignore_patterns: &[IgnorePattern]) -> bool {
+    let path_str = path.to_string_lossy();
+    // Normalize path separators to forward slashes for glob matching (Windows compatibility)
+    let normalized_path = if std::path::MAIN_SEPARATOR == '\\' {
+        path_str.replace('\\', "/")
+    } else {
+        path_str.to_string()
+    };
+
+    let match_options = MatchOptions {
+        case_sensitive: true, // Default
+        require_literal_separator: true, // Do not allow * to match /
+        require_literal_leading_dot: false, // Default
+    };
+
     ignore_patterns.iter().any(|pattern| {
-        is_path_ignored_by_single_pattern(path, &path_str, pattern)
+        match pattern {
+            IgnorePattern::Glob(p) => p.matches_with(&normalized_path, match_options),
+            IgnorePattern::Exact(p) => {
+                 // Exact path component matching
+                // Check if the pattern matches a path component or the end of the path
+                // This prevents "target" from matching "src/targets/file.rs"
+                for component in path.components() {
+                    if let Some(comp_str) = component.as_os_str().to_str() {
+                        if comp_str == p {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+        }
     })
 }
 
 impl FileWatcher {
     pub fn new(file_change_callback: FileChangeCallback) -> crate::Result<Self> {
+        let defaults = vec![
+            ".git".to_string(),
+            "target".to_string(),
+            "node_modules".to_string(),
+            ".DS_Store".to_string(),
+            "**/*.tmp".to_string(),
+            "**/*.log".to_string(),
+        ];
+
+        let ignore_patterns = defaults.iter().map(|s| parse_ignore_pattern(s)).collect();
+
         Ok(Self {
             file_change_callback,
             watched_paths: HashMap::new(),
-            ignore_patterns: vec![
-                ".git".to_string(),
-                "target".to_string(),
-                "node_modules".to_string(),
-                ".DS_Store".to_string(),
-                "*.tmp".to_string(),
-                "*.log".to_string(),
-            ],
+            ignore_patterns,
+            raw_ignore_patterns: defaults,
         })
     }
 
@@ -88,7 +108,8 @@ impl FileWatcher {
     }
 
     pub fn add_ignore_pattern(&mut self, pattern: String) {
-        self.ignore_patterns.push(pattern);
+        self.ignore_patterns.push(parse_ignore_pattern(&pattern));
+        self.raw_ignore_patterns.push(pattern);
     }
 
     pub fn should_ignore(&self, path: &Path) -> bool {
@@ -200,7 +221,7 @@ impl FileWatcher {
     }
 
     pub fn get_ignore_patterns(&self) -> &Vec<String> {
-        &self.ignore_patterns
+        &self.raw_ignore_patterns
     }
 }
 
@@ -230,11 +251,27 @@ mod tests {
         assert!(file_watcher.should_ignore(&PathBuf::from(".git/config")));
         assert!(file_watcher.should_ignore(&PathBuf::from("target/debug/app")));
         assert!(file_watcher.should_ignore(&PathBuf::from("node_modules/lodash")));
-        assert!(file_watcher.should_ignore(&PathBuf::from("app.log")));
+        // Need full match for exact files unless glob is used?
+        // No, current logic is "component matching" for exact.
+        // So "app.log" is exact. "app.log" should ignore "src/app.log"??
+        // Wait, default is "**/*.log".
         
-        // Test glob patterns
-        file_watcher.add_ignore_pattern("*.tmp".to_string());
+        // Test default globs
         assert!(file_watcher.should_ignore(&PathBuf::from("temp.tmp")));
+        assert!(file_watcher.should_ignore(&PathBuf::from("src/temp.tmp"))); // Recursive due to **
         assert!(!file_watcher.should_ignore(&PathBuf::from("temp.txt")));
+
+        // Test glob patterns added manually
+        file_watcher.add_ignore_pattern("*.custom".to_string()); // Non recursive because required literal separator
+        assert!(file_watcher.should_ignore(&PathBuf::from("file.custom")));
+        assert!(!file_watcher.should_ignore(&PathBuf::from("src/file.custom"))); // Should NOT match now
+
+        file_watcher.add_ignore_pattern("**/*.recursive".to_string());
+        assert!(file_watcher.should_ignore(&PathBuf::from("src/test.recursive")));
+
+        // Test more complex glob patterns supported by glob crate
+        file_watcher.add_ignore_pattern("src/**/*.rs.bk".to_string());
+        assert!(file_watcher.should_ignore(&PathBuf::from("src/utils/file.rs.bk")));
+        assert!(!file_watcher.should_ignore(&PathBuf::from("src/utils/file.rs")));
     }
 }
