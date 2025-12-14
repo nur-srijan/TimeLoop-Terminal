@@ -4,6 +4,7 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 use uuid::Uuid;
 
@@ -321,10 +322,17 @@ impl EventRecorder {
             return None;
         }
 
-        match fs::read(path) {
-            Ok(content) => {
+        match fs::File::open(path) {
+            Ok(mut file) => {
                 let mut hasher = Sha256::new();
-                hasher.update(&content);
+                let mut buffer = [0; 8192]; // 8KB buffer
+                loop {
+                    match file.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => hasher.update(&buffer[..n]),
+                        Err(_) => return None,
+                    }
+                }
                 let result = hasher.finalize();
                 Some(format!("{:x}", result))
             }
