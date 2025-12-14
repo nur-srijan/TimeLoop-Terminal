@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::collections::HashMap;
 use notify::{Watcher, RecursiveMode, recommended_watcher};
 use std::sync::mpsc;
@@ -14,6 +14,51 @@ pub struct FileWatcher {
     file_change_callback: FileChangeCallback,
     watched_paths: HashMap<PathBuf, bool>,
     ignore_patterns: Vec<String>,
+}
+
+// Helper function to encapsulate the ignore logic for a single pattern
+fn is_path_ignored_by_single_pattern(path: &Path, path_str: &str, pattern: &str) -> bool {
+    if pattern.contains('*') {
+        matches_glob(path_str, pattern)
+    } else {
+        // Exact path component matching
+        // Check if the pattern matches a path component or the end of the path
+        // This prevents "target" from matching "src/targets/file.rs"
+        for component in path.components() {
+            if let Some(comp_str) = component.as_os_str().to_str() {
+                if comp_str == pattern {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+fn matches_glob(path: &str, pattern: &str) -> bool {
+    // Simple glob matching - can be enhanced with a proper glob library
+    if pattern == "*" {
+        return true;
+    }
+
+    if pattern.starts_with("*.") {
+        let ext = &pattern[1..];
+        return path.ends_with(ext);
+    }
+
+    if let Some(prefix) = pattern.strip_suffix("*") {
+        return path.starts_with(prefix);
+    }
+
+    path == pattern
+}
+
+// Static helper to avoid code duplication and allow usage without &self (e.g. in threads)
+fn should_ignore_path(path: &Path, ignore_patterns: &[String]) -> bool {
+    let path_str = path.to_string_lossy().to_string();
+    ignore_patterns.iter().any(|pattern| {
+        is_path_ignored_by_single_pattern(path, &path_str, pattern)
+    })
 }
 
 impl FileWatcher {
@@ -46,48 +91,8 @@ impl FileWatcher {
         self.ignore_patterns.push(pattern);
     }
 
-    fn should_ignore(&self, path: &Path, ignore_patterns: &[String]) -> bool {
-        let path_str = path.to_string_lossy().to_string();
-        ignore_patterns.iter().any(|pattern| {
-            self.is_path_ignored_by_single_pattern(path, &path_str, pattern)
-        })
-    }
-
-    // New helper function to encapsulate the ignore logic for a single pattern
-    fn is_path_ignored_by_single_pattern(&self, path: &Path, path_str: &str, pattern: &str) -> bool {
-        if pattern.contains('*') {
-            self.matches_glob(path_str, pattern)
-        } else {
-            // Exact path component matching
-            // Check if the pattern matches a path component or the end of the path
-            // This prevents "target" from matching "src/targets/file.rs"
-            for component in path.components() {
-                if let Some(comp_str) = component.as_os_str().to_str() {
-                    if comp_str == pattern {
-                        return true;
-                    }
-                }
-            }
-            false
-        }
-    }
-
-    fn matches_glob(&self, path: &str, pattern: &str) -> bool {
-        // Simple glob matching - can be enhanced with a proper glob library
-        if pattern == "*" {
-            return true;
-        }
-        
-        if pattern.starts_with("*.") {
-            let ext = &pattern[1..];
-            return path.ends_with(ext);
-        }
-        
-        if let Some(prefix) = pattern.strip_suffix("*") {
-            return path.starts_with(prefix);
-        }
-        
-        path == pattern
+    pub fn should_ignore(&self, path: &Path) -> bool {
+        should_ignore_path(path, &self.ignore_patterns)
     }
 
     pub async fn start_watching(&mut self) -> crate::Result<()> {
@@ -116,16 +121,9 @@ impl FileWatcher {
                     Ok(Ok(event)) => {
                         // Filter out ignored files
                         let notify::Event { paths, .. } = &event;
-                        // Assuming `self` (FileWatcher instance) is available and `self.ignore_patterns` is `Arc<Vec<String>>`
-                        let file_watcher_clone = self.clone(); // Or Arc::clone(&self) if self is Arc<FileWatcher>
-                        let ignore_patterns_arc = self.ignore_patterns.clone(); // Capture the Arc for the closure
                         
                         let should_process = paths.iter().all(|path| {
-                            let path_str = path.to_string_lossy().to_string();
-                            let patterns = ignore_patterns_arc.iter(); // Dereference Arc to get Vec<String> reference
-                            !patterns.any(|pattern| {
-                                file_watcher_clone.is_path_ignored_by_single_pattern(path, &path_str, pattern)
-                            })
+                            !should_ignore_path(path, &ignore_patterns)
                         });
                         
                         if should_process {
