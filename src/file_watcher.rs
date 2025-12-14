@@ -249,11 +249,6 @@ mod tests {
         assert!(file_watcher.should_ignore(&PathBuf::from(".git/config")));
         assert!(file_watcher.should_ignore(&PathBuf::from("target/debug/app")));
         assert!(file_watcher.should_ignore(&PathBuf::from("node_modules/lodash")));
-        // Need full match for exact files unless glob is used?
-        // No, current logic is "component matching" for exact.
-        // So "app.log" is exact. "app.log" should ignore "src/app.log"??
-        // Wait, default is "**/*.log".
-        
         // Test default globs
         assert!(file_watcher.should_ignore(&PathBuf::from("temp.tmp")));
         assert!(file_watcher.should_ignore(&PathBuf::from("src/temp.tmp"))); // Recursive due to **
