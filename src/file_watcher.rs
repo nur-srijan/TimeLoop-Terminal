@@ -47,7 +47,7 @@ fn should_ignore_path(path: &Path, ignore_patterns: &[IgnorePattern]) -> bool {
     let normalized_path = if std::path::MAIN_SEPARATOR == '\\' {
         path_str.replace('\\', "/")
     } else {
-        path_str.to_string()
+        path_str.into_owned()
     };
 
     let match_options = MatchOptions {
