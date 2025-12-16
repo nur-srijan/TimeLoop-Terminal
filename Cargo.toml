@@ -70,11 +70,6 @@ tokio-test = "0.4"
 tempfile = "3.10"
 
 [[bin]]
-name = "gui"
-path = "src/bin/gui.rs"
-required-features = ["gui"]
-
-[[bin]]
 name = "gpu_gui"
 path = "src/bin/gpu_gui.rs"
 required-features = ["gui"]
