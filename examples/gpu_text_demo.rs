@@ -18,25 +18,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_inner_size(winit::dpi::LogicalSize::new(800, 600));
 
     let window = Arc::new(event_loop.create_window(window_attributes)?);
-    
-    // Create GPU renderer
-    // GpuRenderer::new now likely takes `Arc<Window>` or `Window`, based on wgpu adapter changes.
-    // The previous error was: `expected Window, found &Window`
-    // So we should pass the window, but we also need it for the event loop.
-    // However, `create_window` from `EventLoop` in newer winit might return `Window` not `Arc<Window>` or similar?
-    // Wait, winit 0.30 changed API significantly.
-    // `create_window` is on `ActiveEventLoop` which is passed to `run_app` or similar.
-    // But here `EventLoop::new()` returns `EventLoop`.
-    // The error message: `use of deprecated method winit::event_loop::EventLoop::<T>::create_window: use ActiveEventLoop::create_window instead`
-    // And `GpuRenderer::new` expects `Window`.
-
-    // Let's assume for now we can just fix the call site error `&window` -> `window`.
-    // But since we use `window` later in the closure, and `Window` is not Copy/Clone (usually),
-    // we might need to wrap it in Arc or move it.
-    // But `GpuRenderer` likely needs ownership or a reference that lasts long enough.
-    // The error said: `expected Window, found &Window`. This implies it wants ownership.
-    // If it takes ownership, we can't use `window` in the event loop closure easily unless we share it via Arc.
-    // Let's check `src/gpu_renderer.rs` to see what it expects.
     let mut renderer = GpuRenderer::new(window.clone()).await?;
     
     // Demo text
