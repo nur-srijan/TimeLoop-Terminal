@@ -316,20 +316,31 @@ impl EventRecorder {
     }
 
     fn compute_file_hash(&self, path: &str) -> Option<String> {
+        use std::io::Read;
         let path = Path::new(path);
         if !path.exists() {
             return None;
         }
 
-        match fs::read(path) {
-            Ok(content) => {
-                let mut hasher = Sha256::new();
-                hasher.update(&content);
-                let result = hasher.finalize();
-                Some(format!("{:x}", result))
+        let mut file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(_) => return None,
+        };
+
+        let mut hasher = Sha256::new();
+        let mut buffer = [0; 8192]; // 8KB buffer
+
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => hasher.update(&buffer[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return None,
             }
-            Err(_) => None,
         }
+
+        let result = hasher.finalize();
+        Some(format!("{:x}", result))
     }
 }
 
