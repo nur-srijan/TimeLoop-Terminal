@@ -1,3 +1,3 @@
-## 2024-03-20 - [Micro-UX: Tooltips in egui]
-**Learning:** In egui, adding tooltips is as simple as chaining `.on_hover_text()` to the widget response. This is a high-impact, low-effort way to improve discoverability for icon-less or context-heavy buttons.
-**Action:** Always check `egui` widgets for `Response` objects that can accept hover interactions.
+## 2024-05-23 - Interactive Timeline & Keyboard Shortcuts
+**Learning:** `egui`'s `allocate_exact_size` returns a `Response` object that can be used for both layout allocation and event handling. By changing the sense from `Sense::hover()` to `Sense::click()`, we can easily turn a static visualization (like a progress bar) into an interactive control (seek bar) without changing the visual rendering logic.
+**Action:** Always check if a static visualization could benefit from being interactive. If so, simply upgrade the `Sense` and handle the `clicked()` or `dragged()` events using `interact_pointer_pos()`. Also, `!ctx.wants_keyboard_input()` is crucial for global shortcuts to avoid conflicts with text input widgets.
