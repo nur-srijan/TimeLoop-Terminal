@@ -34,6 +34,15 @@ impl Default for TimeLoopGui {
 
 impl eframe::App for TimeLoopGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle global shortcuts
+        if !ctx.wants_keyboard_input() {
+            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                if self.selected.is_some() && self.replay_summary.is_some() {
+                    self.playing = !self.playing;
+                }
+            }
+        }
+
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.heading("TimeLoop Terminal (GUI)");
         });
@@ -47,6 +56,7 @@ impl eframe::App for TimeLoopGui {
                         self.selected.as_deref() == Some(&s.id),
                         format!("{} - {}", s.id, s.name),
                     )
+                    .on_hover_text(format!("Session ID: {}\nName: {}", s.id, s.name))
                     .clicked()
                 {
                     self.selected = Some(s.id.clone());
@@ -97,7 +107,7 @@ impl eframe::App for TimeLoopGui {
                     ui.horizontal(|ui| {
                         if ui
                             .button(if self.playing { "Pause" } else { "Play" })
-                            .on_hover_text("Start or pause session playback")
+                            .on_hover_text("Start or pause session playback (Space)")
                             .clicked()
                         {
                             self.playing = !self.playing;
@@ -124,9 +134,21 @@ impl eframe::App for TimeLoopGui {
                     };
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 30.0),
-                        egui::Sense::hover(),
+                        egui::Sense::click(),
                     );
-                    response.on_hover_text(format!("Playback progress: {:.0}%", fraction * 100.0));
+                    let response = response.on_hover_text(format!("Playback progress: {:.0}%", fraction * 100.0));
+
+                    if response.clicked() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let x = pos.x - rect.min.x;
+                            let frac = x / rect.width();
+                            self.position_ms =
+                                (frac * rs.duration.num_milliseconds() as f32) as i64;
+                            self.position_ms =
+                                self.position_ms.max(0).min(rs.duration.num_milliseconds());
+                            ctx.request_repaint();
+                        }
+                    }
 
                     ui.painter()
                         .rect_filled(rect, 4.0, egui::Color32::DARK_GRAY);
