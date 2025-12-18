@@ -100,8 +100,22 @@ impl EventRecorder {
             .unwrap_or(0);
         // Enable redaction by default with sensible patterns
         let default_patterns = vec![
-            r"(?i)(password|pwd|secret|token|api_key)\s*[:=]\s*[^\s\n]+".to_string(),
+            // Generic assignment (e.g. password=...)
+            r"(?i)(password|pwd|secret|token|api_key|access_key|secret_key)\s*[:=]\s*[^\s\n]+".to_string(),
+            // Bearer tokens
             r"(?i)bearer\s+[A-Za-z0-9\-\._]+".to_string(),
+            // AWS Access Key ID
+            r"(?i)AKIA[0-9A-Z]{16}".to_string(),
+            // AWS Secret Access Key
+            r"(?i)[0-9a-zA-Z/+]{40}".to_string(),
+            // GitHub Token
+            r"(?i)gh[pousr]_[A-Za-z0-9_]{36,255}".to_string(),
+            // Slack Token
+            r"(?i)xox[baprs]-([0-9a-zA-Z]{10,48})?".to_string(),
+            // Private Key Header
+            r"(?i)-----BEGIN[ A-Z0-9]+PRIVATE KEY-----".to_string(),
+            // Generic URI with credentials
+            r"(?i)[a-z]+://[^/\s]*:[^/\s]*@[^/\s]+".to_string(),
         ];
         let compiled = default_patterns
             .into_iter()
@@ -212,16 +226,16 @@ impl EventRecorder {
         working_dir: &str,
     ) -> crate::Result<()> {
         self.sequence_counter += 1;
-        let stored_output = if self.redact_output {
-            self.apply_redaction(output)
+        let (stored_command, stored_output) = if self.redact_output {
+            (self.apply_redaction(command), self.apply_redaction(output))
         } else {
-            output.to_string()
+            (command.to_string(), output.to_string())
         };
 
         let event = Event::new(
             &self.session_id,
             EventType::Command {
-                command: command.to_string(),
+                command: stored_command,
                 output: stored_output,
                 exit_code,
                 working_directory: working_dir.to_string(),

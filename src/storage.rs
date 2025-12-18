@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{ BufRead, Read, Seek, Write};
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::{RwLock, Arc};
 use std::thread;
 use std::time::Duration;
@@ -659,9 +662,21 @@ impl Storage {
         let suffix: u64 = osrng.next_u64();
         tmp = tmp.with_extension(format!("{}.tmp", suffix));
 
-        // Write tmp file
-        fs::write(&tmp, bytes)
+        // Write tmp file with secure permissions
+        #[allow(unused_mut)]
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+
+        let mut file = options.open(&tmp)
             .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        file.write_all(bytes)
+            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+
         // Rename into place (atomic on most platforms when on same filesystem)
         std::fs::rename(&tmp, path)
             .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
@@ -1399,6 +1414,7 @@ fn global_compaction_policy() -> CompactionPolicy {
         .clone()
 }
 
+#[allow(dead_code)]
 fn global_argon2_config() -> Argon2Config {
     GLOBAL_ARGON2_CONFIG
         .get_or_init(|| RwLock::new(Argon2Config::default()))
