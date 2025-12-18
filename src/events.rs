@@ -88,6 +88,8 @@ pub struct EventRecorder {
     /// If true, command outputs will be redacted using the compiled patterns
     redact_output: bool,
     redact_patterns: Vec<Regex>,
+    redact_literals: Vec<String>,
+    is_paused: bool,
 }
 
 impl EventRecorder {
@@ -122,14 +124,18 @@ impl EventRecorder {
             .filter_map(|p| Regex::new(&p).ok())
             .collect();
 
-        Ok(Self {
+        let mut recorder = Self {
             session_id: session_id.to_string(),
             storage,
             sequence_counter: last_seq,
             current_command: None,
             redact_output: true,
             redact_patterns: compiled,
-        })
+            redact_literals: Vec::new(),
+            is_paused: false,
+        };
+        recorder.load_env_secrets();
+        Ok(recorder)
     }
 
     /// Disable redaction for this recorder. Useful for tests or when raw outputs are required.
@@ -167,14 +173,20 @@ impl EventRecorder {
             Vec::new()
         };
 
-        Self {
+        let mut recorder = Self {
             session_id: session_id.to_string(),
             storage,
             sequence_counter: last_seq,
             current_command: None,
             redact_output: redact,
             redact_patterns: compiled,
+            redact_literals: Vec::new(),
+            is_paused: false,
+        };
+        if redact {
+            recorder.load_env_secrets();
         }
+        recorder
     }
 
     // Remove new_with_unique_db since we're using in-memory storage
@@ -200,10 +212,29 @@ impl EventRecorder {
             current_command: None,
             redact_output: false,
             redact_patterns: Vec::new(),
+            redact_literals: Vec::new(),
+            is_paused: false,
         }
     }
 
+    /// Pause recording (Incognito Mode)
+    pub fn pause_recording(&mut self) {
+        self.is_paused = true;
+    }
+
+    /// Resume recording
+    pub fn resume_recording(&mut self) {
+        self.is_paused = false;
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.is_paused
+    }
+
     pub fn record_key_press(&mut self, key: &str) -> crate::Result<()> {
+        if self.is_paused {
+            return Ok(());
+        }
         self.sequence_counter += 1;
         let event = Event::new(
             &self.session_id,
@@ -225,6 +256,9 @@ impl EventRecorder {
         exit_code: i32,
         working_dir: &str,
     ) -> crate::Result<()> {
+        if self.is_paused {
+            return Ok(());
+        }
         self.sequence_counter += 1;
         let (stored_command, stored_output) = if self.redact_output {
             (self.apply_redaction(command), self.apply_redaction(output))
@@ -254,6 +288,9 @@ impl EventRecorder {
         path: &str,
         change_type: FileChangeType,
     ) -> crate::Result<()> {
+        if self.is_paused {
+            return Ok(());
+        }
         self.sequence_counter += 1;
 
         // Compute content hash if the file exists and isn't deleted
@@ -283,6 +320,9 @@ impl EventRecorder {
         cursor_pos: (u16, u16),
         screen_size: (u16, u16),
     ) -> crate::Result<()> {
+        if self.is_paused {
+            return Ok(());
+        }
         self.sequence_counter += 1;
         let event = Event::new(
             &self.session_id,
@@ -329,8 +369,32 @@ impl EventRecorder {
         &self.storage
     }
 
+    /// Load secrets from environment variables to be redacted as literal strings
+    pub fn load_env_secrets(&mut self) {
+        for (key, value) in std::env::vars() {
+            // Heuristic to identify secret keys
+            let key_upper = key.to_uppercase();
+            if (key_upper.contains("KEY") ||
+                key_upper.contains("TOKEN") ||
+                key_upper.contains("SECRET") ||
+                key_upper.contains("PASSWORD")) &&
+                !value.is_empty() && value.len() > 3 { // Avoid redacting short common strings
+                self.redact_literals.push(value);
+            }
+        }
+        // Sort by length descending to replace longest matches first
+        self.redact_literals.sort_by(|a, b| b.len().cmp(&a.len()));
+    }
+
     fn apply_redaction(&self, text: &str) -> String {
         let mut s = text.to_string();
+
+        // First pass: Env var literals
+        for secret in &self.redact_literals {
+            s = s.replace(secret, "[REDACTED_ENV]");
+        }
+
+        // Second pass: Regex patterns
         for re in &self.redact_patterns {
             s = re.replace_all(&s, "[REDACTED]").to_string();
         }

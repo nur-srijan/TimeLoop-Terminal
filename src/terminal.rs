@@ -133,9 +133,21 @@ impl TerminalEmulator {
         let mut stdout = io::stdout();
 
         let result = loop {
+            // Check incognito status for prompt
+            let is_incognito = if let Ok(guard) = self.event_recorder.lock() {
+                guard.is_paused()
+            } else {
+                false
+            };
+
             // Display styled prompt
-            stdout.execute(SetForegroundColor(Color::Green))?;
-            print!("⚡ ");
+            if is_incognito {
+                stdout.execute(SetForegroundColor(Color::Magenta))?;
+                print!("🕵️ ");
+            } else {
+                stdout.execute(SetForegroundColor(Color::Green))?;
+                print!("⚡ ");
+            }
             stdout.execute(SetForegroundColor(Color::Blue))?;
             print!("[{}]", self.working_directory);
             stdout.execute(SetForegroundColor(Color::Yellow))?;
@@ -171,12 +183,33 @@ impl TerminalEmulator {
                 self.command_history.push_back(input.to_string());
             }
 
-            // Only handle exit command internally, pass everything else to the shell
+            // Handle internal commands
             if input == "exit" || input == "quit" {
                 stdout.execute(SetForegroundColor(Color::Green))?;
                 println!("👋 Goodbye!");
                 stdout.execute(ResetColor)?;
                 break Ok(());
+            } else if input == "incognito" {
+                let is_paused = if let Ok(mut guard) = self.event_recorder.lock() {
+                    if guard.is_paused() {
+                        guard.resume_recording();
+                        false
+                    } else {
+                        guard.pause_recording();
+                        true
+                    }
+                } else {
+                    false
+                };
+
+                stdout.execute(SetForegroundColor(Color::Magenta))?;
+                if is_paused {
+                    println!("🕵️ Incognito mode enabled. Recording paused.");
+                } else {
+                    println!("📝 Incognito mode disabled. Recording resumed.");
+                }
+                stdout.execute(ResetColor)?;
+                continue;
             } else {
                 // Special handling for directory change commands
                 if input == "cd" || input == "cd ~" {
