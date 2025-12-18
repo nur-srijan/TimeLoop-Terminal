@@ -59,7 +59,7 @@ rand = "0.8"
 # Crypto and redaction dependencies
 chacha20poly1305 = "0.10"
 argon2 = "0.4"
-zeroize = "1.5"
+zeroize = { version = "1.5", features = ["derive"] }
 base64 = "0.21"
 regex = "1.11"
 glob = "0.3.3"

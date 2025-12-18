@@ -6,12 +6,14 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Zeroize)]
 pub enum EventType {
     /// A keystroke event
     KeyPress {
         key: String,
+        #[zeroize(skip)]
         timestamp: DateTime<Utc>,
     },
     /// A command execution
@@ -20,6 +22,7 @@ pub enum EventType {
         output: String,
         exit_code: i32,
         working_directory: String,
+        #[zeroize(skip)]
         timestamp: DateTime<Utc>,
     },
     /// File system change
@@ -27,23 +30,27 @@ pub enum EventType {
         path: String,
         change_type: FileChangeType,
         content_hash: Option<String>,
+        #[zeroize(skip)]
         timestamp: DateTime<Utc>,
     },
     /// Terminal state change
     TerminalState {
         cursor_position: (u16, u16),
         screen_size: (u16, u16),
+        #[zeroize(skip)]
         timestamp: DateTime<Utc>,
     },
     /// Session metadata
     SessionMetadata {
         name: String,
+        #[zeroize(skip)]
         created_at: DateTime<Utc>,
+        #[zeroize(skip)]
         timestamp: DateTime<Utc>,
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Zeroize)]
 pub enum FileChangeType {
     Created,
     Modified,
@@ -51,12 +58,13 @@ pub enum FileChangeType {
     Renamed { old_path: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Zeroize)]
 pub struct Event {
     pub id: String,
     pub session_id: String,
     pub event_type: EventType,
     pub sequence_number: u64,
+    #[zeroize(skip)]
     pub timestamp: DateTime<Utc>,
 }
 

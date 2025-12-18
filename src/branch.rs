@@ -2,13 +2,15 @@ use crate::{Event, Storage, TimeLoopError};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use zeroize::Zeroize;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Zeroize)]
 pub struct TimelineBranch {
     pub id: String,
     pub name: String,
     pub parent_session_id: String,
     pub branch_point_event_id: String,
+    #[zeroize(skip)]
     pub created_at: DateTime<Utc>,
     pub description: Option<String>,
 }

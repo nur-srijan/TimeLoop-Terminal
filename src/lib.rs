@@ -7,12 +7,9 @@ pub mod file_watcher;
 pub mod replay;
 pub mod session;
 pub mod storage;
-pub mod file_watcher;
+pub mod terminal;
 pub mod gpu_renderer;
 pub mod gpu_terminal;
-#[cfg(feature = "ai")]
-pub mod ai;
-
 pub use branch::{BranchManager, TimelineBranch};
 pub use error::TimeLoopError;
 pub use events::{Event, EventRecorder, EventType, FileChangeType};
