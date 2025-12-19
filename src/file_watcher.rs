@@ -88,7 +88,24 @@ impl FileWatcher {
 
         // Spawn the file watcher in a separate thread
         let watched_paths = self.watched_paths.clone();
-        let ignore_patterns = self.ignore_patterns.clone();
+
+        // Pre-process ignore patterns for efficiency
+        let mut extensions = Vec::new();
+        let mut prefixes = Vec::new();
+        let mut substrings = Vec::new();
+        let mut match_all = false;
+
+        for pattern in &self.ignore_patterns {
+            if pattern == "*" {
+                match_all = true;
+            } else if pattern.starts_with("*.") {
+                extensions.push(pattern[1..].to_string());
+            } else if pattern.ends_with("*") {
+                prefixes.push(pattern[..pattern.len() - 1].to_string());
+            } else if !pattern.contains('*') {
+                substrings.push(pattern.clone());
+            }
+        }
 
         std::thread::spawn(move || {
             let (notify_tx, notify_rx) = mpsc::channel();
@@ -119,25 +136,26 @@ impl FileWatcher {
                                     // and avoid cloning the ignore_patterns vector
                                     let path_str = path.to_string_lossy();
 
-                                    !ignore_patterns.iter().any(|pattern| {
-                                        if pattern.contains('*') {
-                                            // Simple glob matching
-                                            if pattern == "*" {
-                                                return true;
-                                            }
-                                            if pattern.starts_with("*.") {
-                                                let ext = &pattern[1..];
-                                                return path_str.ends_with(ext);
-                                            }
-                                            if pattern.ends_with("*") {
-                                                let prefix = &pattern[..pattern.len() - 1];
-                                                return path_str.starts_with(prefix);
-                                            }
-                                            false
-                                        } else {
-                                            path_str.contains(pattern)
-                                        }
-                                    })
+                                    if match_all {
+                                        return false; // Ignore everything
+                                    }
+
+                                    // Check extensions (fastest)
+                                    if extensions.iter().any(|ext| path_str.ends_with(ext)) {
+                                        return false;
+                                    }
+
+                                    // Check prefixes
+                                    if prefixes.iter().any(|prefix| path_str.starts_with(prefix)) {
+                                        return false;
+                                    }
+
+                                    // Check substrings (slowest)
+                                    if substrings.iter().any(|sub| path_str.contains(sub)) {
+                                        return false;
+                                    }
+
+                                    true
                                 })
                             }
                         };
