@@ -124,8 +124,18 @@ impl eframe::App for TimeLoopGui {
                     };
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 30.0),
-                        egui::Sense::hover(),
+                        egui::Sense::click_and_drag(),
                     );
+
+                    if response.clicked() || response.dragged() {
+                        if let Some(pointer_pos) = response.interact_pointer_pos() {
+                            let x = pointer_pos.x - rect.min.x;
+                            let ratio = (x / rect.width()).clamp(0.0, 1.0);
+                            self.position_ms =
+                                (rs.duration.num_milliseconds() as f64 * ratio as f64) as i64;
+                        }
+                    }
+
                     response.on_hover_text(format!("Playback progress: {:.0}%", fraction * 100.0));
 
                     ui.painter()
