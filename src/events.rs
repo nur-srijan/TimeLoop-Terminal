@@ -308,11 +308,13 @@ impl EventRecorder {
     }
 
     fn apply_redaction(&self, text: &str) -> String {
-        let mut s = text.to_string();
+        let mut s = std::borrow::Cow::Borrowed(text);
         for re in &self.redact_patterns {
-            s = re.replace_all(&s, "[REDACTED]").to_string();
+            if let std::borrow::Cow::Owned(replaced) = re.replace_all(&s, "[REDACTED]") {
+                s = std::borrow::Cow::Owned(replaced);
+            }
         }
-        s
+        s.into_owned()
     }
 
     fn compute_file_hash(&self, path: &str) -> Option<String> {
