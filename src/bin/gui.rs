@@ -124,9 +124,24 @@ impl eframe::App for TimeLoopGui {
                     };
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 30.0),
-                        egui::Sense::hover(),
+                        egui::Sense::click_and_drag(),
                     );
-                    response.on_hover_text(format!("Playback progress: {:.0}%", fraction * 100.0));
+                    let response = response.on_hover_text(format!(
+                        "Playback progress: {:.0}%\nClick or drag to seek",
+                        fraction * 100.0
+                    ));
+
+                    if response.clicked() || response.dragged() {
+                        if let Some(pointer_pos) = response.interact_pointer_pos() {
+                            let rel_x = pointer_pos.x - rect.min.x;
+                            let new_fraction = (rel_x / rect.width()).clamp(0.0, 1.0);
+                            self.position_ms =
+                                (new_fraction as f64 * rs.duration.num_milliseconds() as f64)
+                                    as i64;
+                            // Redraw immediately for smooth seeking
+                            ctx.request_repaint();
+                        }
+                    }
 
                     ui.painter()
                         .rect_filled(rect, 4.0, egui::Color32::DARK_GRAY);
@@ -162,7 +177,7 @@ impl eframe::App for TimeLoopGui {
 
 fn main() {
     let options = eframe::NativeOptions::default();
-    eframe::run_native(
+    let _ = eframe::run_native(
         "TimeLoop Terminal GUI",
         options,
         Box::new(|_cc| Box::new(TimeLoopGui::default())),
