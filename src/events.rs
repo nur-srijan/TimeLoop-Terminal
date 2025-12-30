@@ -6,12 +6,14 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Zeroize)]
 pub enum EventType {
     /// A keystroke event
     KeyPress {
         key: String,
+        #[zeroize(skip)]
         timestamp: DateTime<Utc>,
     },
     /// A command execution
@@ -20,6 +22,7 @@ pub enum EventType {
         output: String,
         exit_code: i32,
         working_directory: String,
+        #[zeroize(skip)]
         timestamp: DateTime<Utc>,
     },
     /// File system change
@@ -27,23 +30,27 @@ pub enum EventType {
         path: String,
         change_type: FileChangeType,
         content_hash: Option<String>,
+        #[zeroize(skip)]
         timestamp: DateTime<Utc>,
     },
     /// Terminal state change
     TerminalState {
         cursor_position: (u16, u16),
         screen_size: (u16, u16),
+        #[zeroize(skip)]
         timestamp: DateTime<Utc>,
     },
     /// Session metadata
     SessionMetadata {
         name: String,
+        #[zeroize(skip)]
         created_at: DateTime<Utc>,
+        #[zeroize(skip)]
         timestamp: DateTime<Utc>,
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Zeroize)]
 pub enum FileChangeType {
     Created,
     Modified,
@@ -51,12 +58,13 @@ pub enum FileChangeType {
     Renamed { old_path: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Zeroize)]
 pub struct Event {
     pub id: String,
     pub session_id: String,
     pub event_type: EventType,
     pub sequence_number: u64,
+    #[zeroize(skip)]
     pub timestamp: DateTime<Utc>,
 }
 
@@ -80,6 +88,8 @@ pub struct EventRecorder {
     /// If true, command outputs will be redacted using the compiled patterns
     redact_output: bool,
     redact_patterns: Vec<Regex>,
+    redact_literals: Vec<String>,
+    is_paused: bool,
 }
 
 impl EventRecorder {
@@ -92,22 +102,40 @@ impl EventRecorder {
             .unwrap_or(0);
         // Enable redaction by default with sensible patterns
         let default_patterns = vec![
-            r"(?i)(password|pwd|secret|token|api_key)\s*[:=]\s*[^\s\n]+".to_string(),
+            // Generic assignment (e.g. password=...)
+            r"(?i)(password|pwd|secret|token|api_key|access_key|secret_key)\s*[:=]\s*[^\s\n]+".to_string(),
+            // Bearer tokens
             r"(?i)bearer\s+[A-Za-z0-9\-\._]+".to_string(),
+            // AWS Access Key ID
+            r"(?i)AKIA[0-9A-Z]{16}".to_string(),
+            // AWS Secret Access Key
+            r"(?i)[0-9a-zA-Z/+]{40}".to_string(),
+            // GitHub Token
+            r"(?i)gh[pousr]_[A-Za-z0-9_]{36,255}".to_string(),
+            // Slack Token
+            r"(?i)xox[baprs]-([0-9a-zA-Z]{10,48})?".to_string(),
+            // Private Key Header
+            r"(?i)-----BEGIN[ A-Z0-9]+PRIVATE KEY-----".to_string(),
+            // Generic URI with credentials
+            r"(?i)[a-z]+://[^/\s]*:[^/\s]*@[^/\s]+".to_string(),
         ];
         let compiled = default_patterns
             .into_iter()
             .filter_map(|p| Regex::new(&p).ok())
             .collect();
 
-        Ok(Self {
+        let mut recorder = Self {
             session_id: session_id.to_string(),
             storage,
             sequence_counter: last_seq,
             current_command: None,
             redact_output: true,
             redact_patterns: compiled,
-        })
+            redact_literals: Vec::new(),
+            is_paused: false,
+        };
+        recorder.load_env_secrets();
+        Ok(recorder)
     }
 
     /// Disable redaction for this recorder. Useful for tests or when raw outputs are required.
@@ -145,14 +173,20 @@ impl EventRecorder {
             Vec::new()
         };
 
-        Self {
+        let mut recorder = Self {
             session_id: session_id.to_string(),
             storage,
             sequence_counter: last_seq,
             current_command: None,
             redact_output: redact,
             redact_patterns: compiled,
+            redact_literals: Vec::new(),
+            is_paused: false,
+        };
+        if redact {
+            recorder.load_env_secrets();
         }
+        recorder
     }
 
     // Remove new_with_unique_db since we're using in-memory storage
@@ -178,10 +212,29 @@ impl EventRecorder {
             current_command: None,
             redact_output: false,
             redact_patterns: Vec::new(),
+            redact_literals: Vec::new(),
+            is_paused: false,
         }
     }
 
+    /// Pause recording (Incognito Mode)
+    pub fn pause_recording(&mut self) {
+        self.is_paused = true;
+    }
+
+    /// Resume recording
+    pub fn resume_recording(&mut self) {
+        self.is_paused = false;
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.is_paused
+    }
+
     pub fn record_key_press(&mut self, key: &str) -> crate::Result<()> {
+        if self.is_paused {
+            return Ok(());
+        }
         self.sequence_counter += 1;
         let event = Event::new(
             &self.session_id,
@@ -203,17 +256,20 @@ impl EventRecorder {
         exit_code: i32,
         working_dir: &str,
     ) -> crate::Result<()> {
+        if self.is_paused {
+            return Ok(());
+        }
         self.sequence_counter += 1;
-        let stored_output = if self.redact_output {
-            self.apply_redaction(output)
+        let (stored_command, stored_output) = if self.redact_output {
+            (self.apply_redaction(command), self.apply_redaction(output))
         } else {
-            output.to_string()
+            (command.to_string(), output.to_string())
         };
 
         let event = Event::new(
             &self.session_id,
             EventType::Command {
-                command: command.to_string(),
+                command: stored_command,
                 output: stored_output,
                 exit_code,
                 working_directory: working_dir.to_string(),
@@ -232,6 +288,9 @@ impl EventRecorder {
         path: &str,
         change_type: FileChangeType,
     ) -> crate::Result<()> {
+        if self.is_paused {
+            return Ok(());
+        }
         self.sequence_counter += 1;
 
         // Compute content hash if the file exists and isn't deleted
@@ -261,6 +320,9 @@ impl EventRecorder {
         cursor_pos: (u16, u16),
         screen_size: (u16, u16),
     ) -> crate::Result<()> {
+        if self.is_paused {
+            return Ok(());
+        }
         self.sequence_counter += 1;
         let event = Event::new(
             &self.session_id,
@@ -307,8 +369,32 @@ impl EventRecorder {
         &self.storage
     }
 
+    /// Load secrets from environment variables to be redacted as literal strings
+    pub fn load_env_secrets(&mut self) {
+        for (key, value) in std::env::vars() {
+            // Heuristic to identify secret keys
+            let key_upper = key.to_uppercase();
+            if (key_upper.contains("KEY") ||
+                key_upper.contains("TOKEN") ||
+                key_upper.contains("SECRET") ||
+                key_upper.contains("PASSWORD")) &&
+                !value.is_empty() && value.len() > 3 { // Avoid redacting short common strings
+                self.redact_literals.push(value);
+            }
+        }
+        // Sort by length descending to replace longest matches first
+        self.redact_literals.sort_by(|a, b| b.len().cmp(&a.len()));
+    }
+
     fn apply_redaction(&self, text: &str) -> String {
         let mut s = text.to_string();
+
+        // First pass: Env var literals
+        for secret in &self.redact_literals {
+            s = s.replace(secret, "[REDACTED_ENV]");
+        }
+
+        // Second pass: Regex patterns
         for re in &self.redact_patterns {
             s = re.replace_all(&s, "[REDACTED]").to_string();
         }

@@ -2,12 +2,15 @@ use crate::{EventType, Storage, TimeLoopError};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use zeroize::Zeroize;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Zeroize)]
 pub struct Session {
     pub id: String,
     pub name: String,
+    #[zeroize(skip)]
     pub created_at: DateTime<Utc>,
+    #[zeroize(skip)]
     pub ended_at: Option<DateTime<Utc>>,
     pub parent_session_id: Option<String>,
     pub branch_name: Option<String>,

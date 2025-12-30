@@ -1,10 +1,25 @@
+use std::collections::HashMap;
+use std::fs;
+use std::io::{ BufRead, Read, Seek, Write};
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::sync::{RwLock, Arc};
+use std::thread;
+use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::path::PathBuf;
+use chrono::{DateTime, Utc};
+use once_cell::sync::{Lazy, OnceCell};
+use serde::{Deserialize, Serialize};
+use crate::Event;
+use crate::session::Session;
+use crate::branch::TimelineBranch;
 use argon2::Argon2;
 use base64;
 use base64::engine::general_purpose;
 use base64::Engine as _;
 use chacha20poly1305;
-use chrono::{DateTime, Utc};
-use once_cell::sync::{Lazy, OnceCell};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -22,9 +37,34 @@ use crate::branch::TimelineBranch;
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct StorageInner {
+    #[zeroize(skip)]
     events: HashMap<String, Vec<Event>>,       // session_id -> events
+    #[zeroize(skip)]
     sessions: HashMap<String, Session>,        // session_id -> session
+    #[zeroize(skip)]
     branches: HashMap<String, TimelineBranch>, // branch_id -> branch
+}
+
+impl Drop for StorageInner {
+    fn drop(&mut self) {
+        // Manually clear hash maps to zeroize contents
+        for events in self.events.values_mut() {
+            for event in events {
+                event.zeroize();
+            }
+        }
+        self.events.clear();
+
+        for session in self.sessions.values_mut() {
+            session.zeroize();
+        }
+        self.sessions.clear();
+
+        for branch in self.branches.values_mut() {
+            branch.zeroize();
+        }
+        self.branches.clear();
+    }
 }
 
 // Atomic counter for tracking pending write operations to reduce lock contention
@@ -42,9 +82,9 @@ pub struct Argon2Config {
 impl Default for Argon2Config {
     fn default() -> Self {
         Self {
-            memory_kib: 1024, // 1 MiB (reduced for demo)
-            iterations: 2,
-            parallelism: 1,
+            memory_kib: 64 * 1024, // 64 MiB
+            iterations: 3,
+            parallelism: 4,
         }
     }
 }
@@ -131,86 +171,6 @@ impl Storage {
         }
     }
 
-    /// Encrypt data using the storage's encryption key and salt
-    fn encrypt_data(&self, data: &[u8], key: &[u8; 32], salt: &[u8]) -> crate::Result<Vec<u8>> {
-        use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, KeyInit};
-        use chacha20poly1305::aead::Aead;
-        
-        // Derive key using Argon2
-        let default_config = Argon2Config::default();
-        let argon2_config = self.argon2_config.as_ref().unwrap_or(&default_config);
-        let argon2 = Argon2::new(
-            argon2::Algorithm::Argon2id,
-            argon2::Version::V0x13,
-            argon2::Params::new(
-                argon2_config.memory_kib * 1024,
-                argon2_config.iterations,
-                argon2_config.parallelism,
-                Some(32), // output length
-            ).map_err(|e| crate::error::TimeLoopError::Storage(format!("Argon2 params error: {}", e)))?,
-        );
-        
-        let mut derived_key = [0u8; 32];
-        argon2.hash_password_into(key, salt, &mut derived_key)
-            .map_err(|e| crate::error::TimeLoopError::Storage(format!("Argon2 key derivation failed: {}", e)))?;
-        
-        // Generate random nonce
-        let mut nonce_bytes = [0u8; 12];
-        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-        
-        // Encrypt data
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&derived_key));
-        let ciphertext = cipher.encrypt(nonce, data)
-            .map_err(|e| crate::error::TimeLoopError::Storage(format!("Encryption failed: {}", e)))?;
-        
-        // Prepend nonce to ciphertext
-        let mut result = Vec::with_capacity(12 + ciphertext.len());
-        result.extend_from_slice(&nonce_bytes);
-        result.extend_from_slice(&ciphertext);
-        
-        Ok(result)
-    }
-
-    /// Decrypt data using the storage's encryption key and salt
-    fn decrypt_data(&self, encrypted_data: &[u8], key: &[u8; 32], salt: &[u8]) -> crate::Result<Vec<u8>> {
-        use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, KeyInit};
-        use chacha20poly1305::aead::Aead;
-        
-        if encrypted_data.len() < 12 {
-            return Err(crate::error::TimeLoopError::Storage("Invalid encrypted data: too short".to_string()));
-        }
-        
-        // Extract nonce and ciphertext
-        let nonce_bytes = &encrypted_data[0..12];
-        let ciphertext = &encrypted_data[12..];
-        let nonce = Nonce::from_slice(nonce_bytes);
-        
-        // Derive key using Argon2
-        let default_config = Argon2Config::default();
-        let argon2_config = self.argon2_config.as_ref().unwrap_or(&default_config);
-        let argon2 = Argon2::new(
-            argon2::Algorithm::Argon2id,
-            argon2::Version::V0x13,
-            argon2::Params::new(
-                argon2_config.memory_kib * 1024,
-                argon2_config.iterations,
-                argon2_config.parallelism,
-                Some(32), // output length
-            ).map_err(|e| crate::error::TimeLoopError::Storage(format!("Argon2 params error: {}", e)))?,
-        );
-        
-        let mut derived_key = [0u8; 32];
-        argon2.hash_password_into(key, salt, &mut derived_key)
-            .map_err(|e| crate::error::TimeLoopError::Storage(format!("Argon2 key derivation failed: {}", e)))?;
-        
-        // Decrypt data
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&derived_key));
-        let plaintext = cipher.decrypt(nonce, ciphertext)
-            .map_err(|e| crate::error::TimeLoopError::Storage(format!("Decryption failed: {}", e)))?;
-        
-        Ok(plaintext)
-    }
 
     /// Replace the compaction policy for this instance
     pub fn set_compaction_policy(&mut self, p: CompactionPolicy) {
@@ -618,41 +578,87 @@ impl Storage {
             .ok_or_else(|| crate::error::TimeLoopError::SessionNotFound(session_id.to_string()))?;
         let events = self.get_events_for_session(session_id)?;
         let bundle = SessionExport { session, events };
-        
+
         // Serialize the data
         let json = serde_json::to_string_pretty(&bundle)?;
-        let data = json.as_bytes();
-        
+        let mut data_bytes = json.as_bytes().to_vec();
+
         // If storage is encrypted, re-encrypt the backup data
-        let final_data = if let (Some(key), Some(salt)) = (&self.encryption_key, &self.encryption_salt) {
-            self.encrypt_data(data, key, salt)?
+        if let Some(key) = &self.encryption_key {
+            // reuse salt if present
+            let salt = self.encryption_salt.as_ref().ok_or_else(|| {
+                crate::error::TimeLoopError::Configuration(
+                    "Missing salt for encrypted storage".to_string(),
+                )
+            })?;
+            let (nonce, ciphertext) = Self::encrypt_bytes(key, &data_bytes)?;
+
+            // Use EncryptedFile wrapper to include salt, nonce, and ciphertext
+            let wrapper = EncryptedFile {
+                salt: general_purpose::STANDARD.encode(salt),
+                nonce: general_purpose::STANDARD.encode(&nonce),
+                ciphertext: general_purpose::STANDARD.encode(&ciphertext),
+            };
+            let wrapper_json = serde_json::to_string_pretty(&wrapper)?;
+
+            // Write to file
+            let mut file = fs::File::create(path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            file.write_all(wrapper_json.as_bytes()).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+
+            // zeroize plaintext
+            data_bytes.zeroize();
         } else {
-            data.to_vec()
-        };
-        
-        // Write the data (encrypted or plaintext)
-        let mut file = fs::File::create(path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-        file.write_all(&final_data).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            // Plaintext export
+            let mut file = fs::File::create(path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            file.write_all(&data_bytes).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            data_bytes.zeroize();
+        }
         Ok(())
     }
 
     pub fn import_session_from_file(&self, path: &str) -> crate::Result<String> {
-        let encrypted_data = fs::read(path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-        
-        // Try to decrypt if we have encryption keys, otherwise treat as plaintext
-        let data = if let (Some(key), Some(salt)) = (&self.encryption_key, &self.encryption_salt) {
-            // Try to decrypt first
-            match self.decrypt_data(&encrypted_data, key, salt) {
-                Ok(decrypted) => decrypted,
-                Err(_) => {
-                    // If decryption fails, try as plaintext JSON
-                    encrypted_data
-                }
-            }
+        let file_bytes = fs::read(path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+
+        // Attempt to parse as EncryptedFile JSON first
+        let data = if let Ok(json_str) = String::from_utf8(file_bytes.clone()) {
+             if let Ok(wrapper) = serde_json::from_str::<EncryptedFile>(&json_str) {
+                 // It's an encrypted export
+                 if let Some(key) = &self.encryption_key {
+                     // Verify salts match if we are to use the current key
+                     // Note: Since we are using the current derived key, we can only decrypt if the export was made
+                     // with the same salt (same storage instance). If salts differ, we can't decrypt with current key.
+                     let file_salt = general_purpose::STANDARD.decode(&wrapper.salt)
+                        .map_err(|e| crate::error::TimeLoopError::Storage(format!("Invalid salt in export: {}", e)))?;
+
+                     if let Some(current_salt) = &self.encryption_salt {
+                         if &file_salt != current_salt {
+                             return Err(crate::error::TimeLoopError::Storage(
+                                 "Cannot import encrypted session: salt mismatch. Import is only supported on the same storage instance.".to_string()
+                             ));
+                         }
+                     }
+
+                     let nonce = general_purpose::STANDARD.decode(&wrapper.nonce)
+                        .map_err(|e| crate::error::TimeLoopError::Storage(format!("Invalid nonce in export: {}", e)))?;
+                     let ciphertext = general_purpose::STANDARD.decode(&wrapper.ciphertext)
+                        .map_err(|e| crate::error::TimeLoopError::Storage(format!("Invalid ciphertext in export: {}", e)))?;
+
+                     match Self::try_decrypt(key, &nonce, &ciphertext) {
+                         Ok(plain) => plain,
+                         Err(_) => return Err(crate::error::TimeLoopError::Storage("Decryption failed".to_string())),
+                     }
+                 } else {
+                     return Err(crate::error::TimeLoopError::Configuration("Storage is not encrypted but import file is.".to_string()));
+                 }
+             } else {
+                 // Not an encrypted wrapper, treat as plaintext
+                 file_bytes
+             }
         } else {
-            encrypted_data
+            // Not valid UTF-8, maybe binary? Treat as is (likely fail JSON parse later if not text)
+            file_bytes
         };
-        
+
         // Parse as JSON
         let json_str = String::from_utf8(data).map_err(|e| crate::error::TimeLoopError::Storage(format!("Invalid UTF-8 in import file: {}", e)))?;
         let bundle: SessionExport = serde_json::from_str(&json_str)?;
@@ -686,9 +692,21 @@ impl Storage {
         let suffix: u64 = osrng.next_u64();
         tmp = tmp.with_extension(format!("{}.tmp", suffix));
 
-        // Write tmp file
-        fs::write(&tmp, bytes)
+        // Write tmp file with secure permissions
+        #[allow(unused_mut)]
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+
+        let mut file = options.open(&tmp)
             .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        file.write_all(bytes)
+            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+
         // Rename into place (atomic on most platforms when on same filesystem)
         std::fs::rename(&tmp, path)
             .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
@@ -1426,6 +1444,7 @@ fn global_compaction_policy() -> CompactionPolicy {
         .clone()
 }
 
+#[allow(dead_code)]
 fn global_argon2_config() -> Argon2Config {
     GLOBAL_ARGON2_CONFIG
         .get_or_init(|| RwLock::new(Argon2Config::default()))
@@ -1933,5 +1952,67 @@ mod tests {
             }
         }
         assert!(rots.len() <= storage.retention_count as usize + 1); // +1 tolerant
+    }
+
+    #[test]
+    fn test_export_import_encrypted() {
+        let tmp_dir = TempDir::new().unwrap();
+        let state_file = tmp_dir.path().join("state.json");
+        let export_file = tmp_dir.path().join("export.json");
+
+        // Create encrypted storage
+        let storage = Storage::with_encryption(state_file.to_str().unwrap(), "password").unwrap();
+
+        // Create a session
+        let session = Session {
+            id: "export-session".to_string(),
+            name: "Export Session".to_string(),
+            created_at: Utc::now(),
+            ended_at: None,
+            parent_session_id: None,
+            branch_name: None,
+        };
+        storage.store_session(&session).unwrap();
+
+        // Export session
+        storage.export_session_to_file("export-session", export_file.to_str().unwrap()).unwrap();
+
+        // Verify file contains salt (by reading it manually)
+        let export_content = std::fs::read_to_string(&export_file).unwrap();
+        let wrapper: serde_json::Value = serde_json::from_str(&export_content).unwrap();
+        assert!(wrapper.get("salt").is_some());
+        assert!(wrapper.get("nonce").is_some());
+        assert!(wrapper.get("ciphertext").is_some());
+
+        // Import session back (simulate restore)
+        let storage2 = Storage::with_encryption(state_file.to_str().unwrap(), "password").unwrap();
+        // Delete session first so import actually does something (though store_session overwrites)
+        storage2.delete_session("export-session").unwrap();
+        assert!(storage2.get_session("export-session").unwrap().is_none());
+
+        // Import
+        let id = storage2.import_session_from_file(export_file.to_str().unwrap()).unwrap();
+        assert_eq!(id, "export-session");
+
+        let restored = storage2.get_session("export-session").unwrap().unwrap();
+        assert_eq!(restored.name, "Export Session");
+    }
+
+    #[test]
+    fn test_zeroize_memory() {
+        // This is a functional test to ensure the Drop trait compiles and runs without panic.
+        let storage = Storage::new().unwrap();
+        let session = Session {
+            id: "z-session".to_string(),
+            name: "Zeroize".to_string(),
+            created_at: Utc::now(),
+            ended_at: None,
+            parent_session_id: None,
+            branch_name: None,
+        };
+        storage.store_session(&session).unwrap();
+
+        // When storage goes out of scope, it should zeroize inner
+        drop(storage);
     }
 }

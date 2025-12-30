@@ -213,22 +213,8 @@ impl FileWatcher {
             let callback = self.file_change_callback.clone();
             let path_str = path.to_string_lossy().to_string();
 
-            let event_kind = event.kind.clone();
+            let change = change_type.clone();
             tokio::spawn(async move {
-                let change = match event_kind {
-                    notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
-                        // For rename, try to read old path from first element if present
-                        // Since we're inside spawned task, we only have current path; this is a best-effort placeholder
-                        if let FileChangeType::Renamed { .. } = &change_type {
-                            FileChangeType::Renamed {
-                                old_path: String::from(""),
-                            }
-                        } else {
-                            change_type
-                        }
-                    }
-                    _ => change_type,
-                };
                 if let Err(e) = callback.lock().await(&path_str, change) {
                     eprintln!("Error in file change callback: {}", e);
                 }
