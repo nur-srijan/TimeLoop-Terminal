@@ -10,6 +10,7 @@ pub mod storage;
 pub mod terminal;
 pub mod gpu_renderer;
 pub mod gpu_terminal;
+
 pub use branch::{BranchManager, TimelineBranch};
 pub use error::TimeLoopError;
 pub use events::{Event, EventRecorder, EventType, FileChangeType};

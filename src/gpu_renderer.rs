@@ -143,7 +143,7 @@ pub struct GlyphPlacement {
 
 impl GpuRenderer {
     /// Create a new GPU renderer
-    pub async fn new(window: Window) -> Result<Self, TimeLoopError> {
+    pub async fn new(window: Arc<Window>) -> Result<Self, TimeLoopError> {
         let size = window.inner_size();
         
         // Initialize wgpu
