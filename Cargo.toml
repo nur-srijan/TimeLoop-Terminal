@@ -79,8 +79,3 @@ default = []
 ai = ["dep:reqwest"]
 gui = ["dep:eframe"]
 all = ["dep:reqwest", "dep:eframe"]
-
-[[bin]]
-name = "gui"
-path = "src/bin/gui.rs"
-required-features = ["gui"]

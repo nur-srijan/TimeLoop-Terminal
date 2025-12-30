@@ -1,9 +1,10 @@
 use timeloop_terminal::GpuRenderer;
 use winit::{
     event::{Event, WindowEvent},
-    event_loop::EventLoop,
-    window::WindowBuilder,
+    event_loop::{ControlFlow, EventLoop},
+    window::Window,
 };
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -12,14 +13,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Create window
     let event_loop = EventLoop::new()?;
-    let window = event_loop.create_window(
-        winit::window::WindowAttributes::default()
-            .with_title("TimeLoop Terminal - GPU Text Demo")
-            .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
-    )?;
-    
-    // Create GPU renderer
-    let mut renderer = GpuRenderer::new(&window).await?;
+    let window_attributes = Window::default_attributes()
+        .with_title("TimeLoop Terminal - GPU Text Demo")
+        .with_inner_size(winit::dpi::LogicalSize::new(800, 600));
+
+    let window = Arc::new(event_loop.create_window(window_attributes)?);
+    let mut renderer = GpuRenderer::new(window.clone()).await?;
     
     // Demo text
     let demo_text = "Hello, TimeLoop Terminal!\nThis is GPU-rendered text.\nIt supports multiple lines and should be smooth.";
@@ -27,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut time = 0.0;
     
     // Run event loop
-    event_loop.run_app(move |event, elwt| {
+    event_loop.run(move |event, elwt| {
         match event {
             Event::WindowEvent {
                 ref event,

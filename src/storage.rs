@@ -1,19 +1,3 @@
-use std::collections::HashMap;
-use std::fs;
-use std::io::{Write as _, BufRead, Read, Seek};
-use std::sync::{RwLock, Arc};
-use std::thread;
-use std::time::Duration;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::path::PathBuf;
-use chrono::{DateTime, Utc};
-use once_cell::sync::{Lazy, OnceCell};
-use serde::{Deserialize, Serialize};
-use crate::Event;
-use crate::session::Session;
-use crate::branch::TimelineBranch;
-use crate::session::Session;
-use crate::Event;
 use argon2::Argon2;
 use base64;
 use base64::engine::general_purpose;
@@ -27,11 +11,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, Read, Seek, Write as _};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 use zeroize::Zeroize;
+use crate::Event;
+use crate::session::Session;
+use crate::branch::TimelineBranch;
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct StorageInner {
@@ -261,6 +248,7 @@ impl Storage {
             compaction_interval_secs: gp.compaction_interval_secs,
             background_running: None,
             background_handle: None,
+            pending_writes: None,
         };
         if append {
             // compute events log path for default global persistence file
@@ -300,6 +288,7 @@ impl Storage {
         let inner = Arc::new(RwLock::new(StorageInner::default()));
 
         let gp = global_compaction_policy();
+        let pending_writes = Arc::new(AtomicU32::new(0));
         let mut storage = Self {
             inner: Some(inner.clone()),
             persistence_path: Some(pb.clone()),
@@ -315,12 +304,8 @@ impl Storage {
             compaction_interval_secs: gp.compaction_interval_secs,
             background_running: None,
             background_handle: None,
+            pending_writes: Some(pending_writes),
         };
-    let inner = Arc::new(RwLock::new(StorageInner::default()));
-    let pending_writes = Arc::new(AtomicU32::new(0));
-    
-    let gp = global_compaction_policy();
-    let mut storage = Self { inner: Some(inner.clone()), persistence_path: Some(pb.clone()), encryption_key: None, encryption_salt: None, argon2_config: None, persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None, pending_writes: Some(pending_writes) };
 
         // If the file exists, load it into the per-instance inner store
         if pb.exists() {
