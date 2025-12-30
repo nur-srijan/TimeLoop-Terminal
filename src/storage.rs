@@ -357,12 +357,12 @@ impl Storage {
             let guard = inner
                 .read()
                 .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-            Ok(f(&*guard))
+            Ok(f(&guard))
         } else {
             let guard = GLOBAL_STORAGE
                 .read()
                 .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-            Ok(f(&*guard))
+            Ok(f(&guard))
         }
     }
 
@@ -375,12 +375,12 @@ impl Storage {
             let mut guard = inner
                 .write()
                 .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-            Ok(f(&mut *guard))
+            Ok(f(&mut guard))
         } else {
             let mut guard = GLOBAL_STORAGE
                 .write()
                 .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
-            Ok(f(&mut *guard))
+            Ok(f(&mut guard))
         }
     }
 
@@ -397,12 +397,10 @@ impl Storage {
         // persist the full state as before.
         if self.append_only {
             let _ = self.append_event_to_log(event);
-        } else {
-            if let Some(path) = &self.persistence_path {
-                let _ = Self::save_to_path(path, self);
-            } else if self.inner.is_none() {
-                let _ = Self::save_to_disk();
-            }
+        } else if let Some(path) = &self.persistence_path {
+            let _ = Self::save_to_path(path, self);
+        } else if self.inner.is_none() {
+            let _ = Self::save_to_disk();
         }
         Ok(())
     }
@@ -706,7 +704,7 @@ impl Storage {
                         }
                         // sort by modified time desc (newest first)
                         rots.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
-                        if rots.len() > retention as usize {
+                        if rots.len() > retention {
                             for (_, path) in rots.iter().skip(retention) {
                                 let _ = std::fs::remove_file(path);
                             }
@@ -826,7 +824,7 @@ impl Storage {
                                             }
                                         }
                                         rots.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
-                                        if rots.len() > retention as usize {
+                                        if rots.len() > retention {
                                             for (_, path) in rots.iter().skip(retention) {
                                                 let _ = std::fs::remove_file(path);
                                             }
@@ -1103,7 +1101,7 @@ impl Storage {
         }
     }
 
-    fn events_log_for(path: &PathBuf, format: PersistenceFormat) -> PathBuf {
+    fn events_log_for(path: &std::path::Path, format: PersistenceFormat) -> PathBuf {
         let fname = path
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -1179,7 +1177,7 @@ impl Storage {
                 .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             loop {
                 let mut len_buf = [0u8; 4];
-                if let Err(_) = file.read_exact(&mut len_buf) {
+                if file.read_exact(&mut len_buf).is_err() {
                     break;
                 }
                 let len = u32::from_le_bytes(len_buf) as usize;
@@ -1310,11 +1308,10 @@ impl Default for CompactionPolicy {
 }
 
 fn global_persistence_format() -> PersistenceFormat {
-    GLOBAL_PERSISTENCE_FORMAT
+    *GLOBAL_PERSISTENCE_FORMAT
         .get_or_init(|| RwLock::new(PersistenceFormat::Json))
         .read()
         .unwrap()
-        .clone()
 }
 
 fn global_append_only() -> bool {
@@ -1325,13 +1322,13 @@ fn global_append_only() -> bool {
 }
 
 fn global_compaction_policy() -> CompactionPolicy {
-    GLOBAL_COMPACTION_POLICY
+    *GLOBAL_COMPACTION_POLICY
         .get_or_init(|| RwLock::new(CompactionPolicy::default()))
         .read()
         .unwrap()
-        .clone()
 }
 
+#[allow(dead_code)]
 fn global_argon2_config() -> Argon2Config {
     GLOBAL_ARGON2_CONFIG
         .get_or_init(|| RwLock::new(Argon2Config::default()))

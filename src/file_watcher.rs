@@ -47,7 +47,7 @@ impl FileWatcher {
         self.ignore_patterns.push(pattern);
     }
 
-    pub fn should_ignore(&self, path: &PathBuf) -> bool {
+    pub fn should_ignore(&self, path: &std::path::Path) -> bool {
         let path_str = path.to_string_lossy();
 
         for pattern in &self.ignore_patterns {
@@ -75,8 +75,7 @@ impl FileWatcher {
             return path.ends_with(ext);
         }
 
-        if pattern.ends_with("*") {
-            let prefix = &pattern[..pattern.len() - 1];
+        if let Some(prefix) = pattern.strip_suffix('*') {
             return path.starts_with(prefix);
         }
 
@@ -112,35 +111,32 @@ impl FileWatcher {
                 match notify_rx.recv() {
                     Ok(Ok(event)) => {
                         // Filter out ignored files
-                        let should_process = match &event {
-                            notify::Event { paths, .. } => {
-                                paths.iter().all(|path| {
-                                    // Optimization: Calculate path string once for all pattern checks
-                                    // and avoid cloning the ignore_patterns vector
-                                    let path_str = path.to_string_lossy();
+                        let notify::Event { paths, .. } = &event;
+                        let should_process = paths.iter().all(|path| {
+                            // Optimization: Calculate path string once for all pattern checks
+                            // and avoid cloning the ignore_patterns vector
+                            let path_str = path.to_string_lossy();
 
-                                    !ignore_patterns.iter().any(|pattern| {
-                                        if pattern.contains('*') {
-                                            // Simple glob matching
-                                            if pattern == "*" {
-                                                return true;
-                                            }
-                                            if pattern.starts_with("*.") {
-                                                let ext = &pattern[1..];
-                                                return path_str.ends_with(ext);
-                                            }
-                                            if pattern.ends_with("*") {
-                                                let prefix = &pattern[..pattern.len() - 1];
-                                                return path_str.starts_with(prefix);
-                                            }
-                                            false
-                                        } else {
-                                            path_str.contains(pattern)
-                                        }
-                                    })
-                                })
-                            }
-                        };
+                            !ignore_patterns.iter().any(|pattern| {
+                                if pattern.contains('*') {
+                                    // Simple glob matching
+                                    if pattern == "*" {
+                                        return true;
+                                    }
+                                    if pattern.starts_with("*.") {
+                                        let ext = &pattern[1..];
+                                        return path_str.ends_with(ext);
+                                    }
+                                    if pattern.ends_with("*") {
+                                        let prefix = &pattern[..pattern.len() - 1];
+                                        return path_str.starts_with(prefix);
+                                    }
+                                    false
+                                } else {
+                                    path_str.contains(pattern)
+                                }
+                            })
+                        });
 
                         if should_process {
                             if let Err(e) = tx.blocking_send(event) {
@@ -185,7 +181,7 @@ impl FileWatcher {
 
             let callback = self.file_change_callback.clone();
             let path_str = path.to_string_lossy().to_string();
-            let event_kind = event.kind.clone();
+            let event_kind = event.kind;
             tokio::spawn(async move {
                 let change = match event_kind {
                     notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
