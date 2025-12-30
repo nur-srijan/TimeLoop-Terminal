@@ -160,6 +160,7 @@ impl SessionManager {
         Ok(tree)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn build_session_node(
         &self,
         session: &Session,
@@ -167,7 +168,7 @@ impl SessionManager {
     ) -> SessionNode {
         let mut children = Vec::new();
 
-        for (_, other_session) in session_map {
+        for other_session in session_map.values() {
             if other_session.parent_session_id.as_ref() == Some(&session.id) {
                 children.push(self.build_session_node(other_session, session_map));
             }

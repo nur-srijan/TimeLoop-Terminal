@@ -316,20 +316,33 @@ impl EventRecorder {
     }
 
     fn compute_file_hash(&self, path: &str) -> Option<String> {
+        use std::io::{BufReader, Read};
+
         let path = Path::new(path);
         if !path.exists() {
             return None;
         }
 
-        match fs::read(path) {
-            Ok(content) => {
-                let mut hasher = Sha256::new();
-                hasher.update(&content);
-                let result = hasher.finalize();
-                Some(format!("{:x}", result))
+        let file = match fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => return None,
+        };
+
+        let mut reader = BufReader::new(file);
+        let mut hasher = Sha256::new();
+        // Use an 8KB buffer for streaming
+        let mut buffer = [0; 8192];
+
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => hasher.update(&buffer[..n]),
+                Err(_) => return None,
             }
-            Err(_) => None,
         }
+
+        let result = hasher.finalize();
+        Some(format!("{:x}", result))
     }
 }
 
