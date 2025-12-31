@@ -11,25 +11,71 @@ use tokio::sync::Mutex;
 pub type FileChangeCallback =
     Arc<Mutex<dyn Fn(&str, FileChangeType) -> crate::Result<()> + Send + Sync>>;
 
+#[derive(Clone, Debug)]
+enum PreparedPattern {
+    Any,
+    Extension(String),
+    Prefix(String),
+    Exact(String),
+    Contains(String),
+}
+
+impl PreparedPattern {
+    fn new(pattern: &str) -> Self {
+        if pattern.contains('*') {
+            if pattern == "*" {
+                return Self::Any;
+            }
+            if pattern.starts_with("*.") {
+                return Self::Extension(pattern[1..].to_string());
+            }
+            if pattern.ends_with("*") {
+                return Self::Prefix(pattern[..pattern.len() - 1].to_string());
+            }
+            Self::Exact(pattern.to_string())
+        } else {
+            Self::Contains(pattern.to_string())
+        }
+    }
+
+    fn matches(&self, path: &str) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Extension(ext) => path.ends_with(ext),
+            Self::Prefix(prefix) => path.starts_with(prefix),
+            Self::Exact(s) => path == s,
+            Self::Contains(s) => path.contains(s),
+        }
+    }
+}
+
 pub struct FileWatcher {
     file_change_callback: FileChangeCallback,
     watched_paths: HashMap<PathBuf, bool>,
     ignore_patterns: Vec<String>,
+    prepared_patterns: Vec<PreparedPattern>,
 }
 
 impl FileWatcher {
     pub fn new(file_change_callback: FileChangeCallback) -> crate::Result<Self> {
+        let ignore_patterns = vec![
+            ".git".to_string(),
+            "target".to_string(),
+            "node_modules".to_string(),
+            ".DS_Store".to_string(),
+            "*.tmp".to_string(),
+            "*.log".to_string(),
+        ];
+        let prepared_patterns = ignore_patterns
+            .iter()
+            .map(|p| PreparedPattern::new(p))
+            .collect();
+
         Ok(Self {
             file_change_callback,
             watched_paths: HashMap::new(),
-            ignore_patterns: vec![
-                ".git".to_string(),
-                "target".to_string(),
-                "node_modules".to_string(),
-                ".DS_Store".to_string(),
-                "*.tmp".to_string(),
-                "*.log".to_string(),
-            ],
+            ignore_patterns,
+            prepared_patterns,
         })
     }
 
@@ -44,43 +90,16 @@ impl FileWatcher {
     }
 
     pub fn add_ignore_pattern(&mut self, pattern: String) {
+        self.prepared_patterns
+            .push(PreparedPattern::new(&pattern));
         self.ignore_patterns.push(pattern);
     }
 
     pub fn should_ignore(&self, path: &PathBuf) -> bool {
         let path_str = path.to_string_lossy();
-
-        for pattern in &self.ignore_patterns {
-            if pattern.contains('*') {
-                // Simple glob pattern matching
-                if self.matches_glob(&path_str, pattern) {
-                    return true;
-                }
-            } else if path_str.contains(pattern) {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn matches_glob(&self, path: &str, pattern: &str) -> bool {
-        // Simple glob matching - can be enhanced with a proper glob library
-        if pattern == "*" {
-            return true;
-        }
-
-        if pattern.starts_with("*.") {
-            let ext = &pattern[1..];
-            return path.ends_with(ext);
-        }
-
-        if pattern.ends_with("*") {
-            let prefix = &pattern[..pattern.len() - 1];
-            return path.starts_with(prefix);
-        }
-
-        path == pattern
+        self.prepared_patterns
+            .iter()
+            .any(|pattern| pattern.matches(&path_str))
     }
 
     pub async fn start_watching(&mut self) -> crate::Result<()> {
@@ -88,7 +107,7 @@ impl FileWatcher {
 
         // Spawn the file watcher in a separate thread
         let watched_paths = self.watched_paths.clone();
-        let ignore_patterns = self.ignore_patterns.clone();
+        let prepared_patterns = self.prepared_patterns.clone();
 
         std::thread::spawn(move || {
             let (notify_tx, notify_rx) = mpsc::channel();
@@ -119,25 +138,9 @@ impl FileWatcher {
                                     // and avoid cloning the ignore_patterns vector
                                     let path_str = path.to_string_lossy();
 
-                                    !ignore_patterns.iter().any(|pattern| {
-                                        if pattern.contains('*') {
-                                            // Simple glob matching
-                                            if pattern == "*" {
-                                                return true;
-                                            }
-                                            if pattern.starts_with("*.") {
-                                                let ext = &pattern[1..];
-                                                return path_str.ends_with(ext);
-                                            }
-                                            if pattern.ends_with("*") {
-                                                let prefix = &pattern[..pattern.len() - 1];
-                                                return path_str.starts_with(prefix);
-                                            }
-                                            false
-                                        } else {
-                                            path_str.contains(pattern)
-                                        }
-                                    })
+                                    !prepared_patterns
+                                        .iter()
+                                        .any(|pattern| pattern.matches(&path_str))
                                 })
                             }
                         };
