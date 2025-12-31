@@ -114,19 +114,41 @@ impl eframe::App for TimeLoopGui {
                     });
 
                     ui.add_space(8.0);
-                    ui.label(format!("Position: {} ms", self.position_ms));
+                    let total_ms = rs.duration.num_milliseconds();
+                    ui.label(format!(
+                        "Position: {} / {}",
+                        format_duration(self.position_ms),
+                        format_duration(total_ms)
+                    ));
 
-                    // Simple timeline visualization
-                    let fraction = if rs.duration.num_milliseconds() > 0 {
-                        (self.position_ms as f64) / (rs.duration.num_milliseconds() as f64)
+                    // Interactive timeline visualization
+                    let fraction = if total_ms > 0 {
+                        (self.position_ms as f64) / (total_ms as f64)
                     } else {
                         0.0
                     };
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 30.0),
-                        egui::Sense::hover(),
+                        egui::Sense::click_and_drag(),
                     );
-                    response.on_hover_text(format!("Playback progress: {:.0}%", fraction * 100.0));
+
+                    if response.clicked() || response.dragged() {
+                        if let Some(pointer_pos) = response.interact_pointer_pos() {
+                            let x = pointer_pos.x - rect.min.x;
+                            let new_fraction = (x / rect.width()).clamp(0.0, 1.0) as f64;
+                            self.position_ms = (new_fraction * total_ms as f64) as i64;
+                        }
+                    }
+
+                    let hover_text = if let Some(hover_pos) = response.hover_pos() {
+                        let x = hover_pos.x - rect.min.x;
+                        let hover_fraction = (x / rect.width()).clamp(0.0, 1.0) as f64;
+                        let hover_ms = (hover_fraction * total_ms as f64) as i64;
+                        format_duration(hover_ms)
+                    } else {
+                        format!("Playback progress: {:.0}%", fraction * 100.0)
+                    };
+                    response.on_hover_text(hover_text);
 
                     ui.painter()
                         .rect_filled(rect, 4.0, egui::Color32::DARK_GRAY);
@@ -157,6 +179,19 @@ impl eframe::App for TimeLoopGui {
                 ui.label("Select a session from the left sidebar to view details.");
             }
         });
+    }
+}
+
+fn format_duration(ms: i64) -> String {
+    let total_seconds = ms / 1000;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    if minutes >= 60 {
+        let hours = minutes / 60;
+        let remaining_minutes = minutes % 60;
+        format!("{:02}:{:02}:{:02}", hours, remaining_minutes, seconds)
+    } else {
+        format!("{:02}:{:02}", minutes, seconds)
     }
 }
 
