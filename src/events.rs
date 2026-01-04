@@ -1,9 +1,10 @@
 use crate::storage::Storage;
 use chrono::{DateTime, Utc};
 use regex::Regex;
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{BufReader, Read};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -308,11 +309,14 @@ impl EventRecorder {
     }
 
     fn apply_redaction(&self, text: &str) -> String {
-        let mut s = text.to_string();
+        // Optimization: Use Cow to avoid allocations if no redaction occurs
+        let mut s = std::borrow::Cow::Borrowed(text);
         for re in &self.redact_patterns {
-            s = re.replace_all(&s, "[REDACTED]").to_string();
+            if let std::borrow::Cow::Owned(new_s) = re.replace_all(&s, "[REDACTED]") {
+                s = std::borrow::Cow::Owned(new_s);
+            }
         }
-        s
+        s.into_owned()
     }
 
     fn compute_file_hash(&self, path: &str) -> Option<String> {
@@ -321,15 +325,26 @@ impl EventRecorder {
             return None;
         }
 
-        match fs::read(path) {
-            Ok(content) => {
-                let mut hasher = Sha256::new();
-                hasher.update(&content);
-                let result = hasher.finalize();
-                Some(format!("{:x}", result))
+        // Optimization: Use BufReader to stream file content instead of reading everything into memory
+        // This prevents OOM errors with large files and reduces memory pressure
+        let file = match fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => return None,
+        };
+        let mut reader = BufReader::new(file);
+        let mut hasher = Sha256::new();
+        let mut buffer = [0; 8192]; // 8KB buffer
+
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => hasher.update(&buffer[..n]),
+                Err(_) => return None,
             }
-            Err(_) => None,
         }
+
+        let result = hasher.finalize();
+        Some(format!("{:x}", result))
     }
 }
 
