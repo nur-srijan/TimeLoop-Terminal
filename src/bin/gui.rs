@@ -94,10 +94,15 @@ impl eframe::App for TimeLoopGui {
                     ui.label(format!("File changes: {}", rs.file_changes));
                     ui.label(format!("Duration: {}s", rs.duration.num_seconds()));
 
+                    // Keyboard shortcuts
+                    if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                        self.playing = !self.playing;
+                    }
+
                     ui.horizontal(|ui| {
                         if ui
                             .button(if self.playing { "Pause" } else { "Play" })
-                            .on_hover_text("Start or pause session playback")
+                            .on_hover_text("Start or pause session playback (Space)")
                             .clicked()
                         {
                             self.playing = !self.playing;
@@ -124,9 +129,23 @@ impl eframe::App for TimeLoopGui {
                     };
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 30.0),
-                        egui::Sense::hover(),
+                        egui::Sense::click(),
                     );
-                    response.on_hover_text(format!("Playback progress: {:.0}%", fraction * 100.0));
+
+                    if response.clicked() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let x = pos.x - rect.min.x;
+                            let new_fraction = (x / rect.width()).clamp(0.0, 1.0);
+                            self.position_ms = (new_fraction as f64
+                                * rs.duration.num_milliseconds() as f64)
+                                as i64;
+                        }
+                    }
+
+                    response.on_hover_text(format!(
+                        "Playback progress: {:.0}% (Click to seek)",
+                        fraction * 100.0
+                    ));
 
                     ui.painter()
                         .rect_filled(rect, 4.0, egui::Color32::DARK_GRAY);
