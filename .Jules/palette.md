@@ -1,3 +1,3 @@
-## 2024-03-20 - [Micro-UX: Tooltips in egui]
-**Learning:** In egui, adding tooltips is as simple as chaining `.on_hover_text()` to the widget response. This is a high-impact, low-effort way to improve discoverability for icon-less or context-heavy buttons.
-**Action:** Always check `egui` widgets for `Response` objects that can accept hover interactions.
+## 2024-05-23 - Interactive Timeline in egui
+**Learning:** `egui::Response` ownership can be tricky when chaining methods like `.on_hover_text()` if the response is needed for interaction checks (`.clicked()`, `.dragged()`). `on_hover_text` consumes `self` and returns a new `Response`.
+**Action:** When adding tooltips to interactive elements where you also need to check interaction status, either check interaction *before* adding the tooltip, or use the builder pattern carefully (chaining) if you don't need the original variable afterwards. Or reassign: `let response = response.on_hover_text(...)`.
