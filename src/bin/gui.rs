@@ -113,20 +113,41 @@ impl eframe::App for TimeLoopGui {
                             .on_hover_text("Adjust playback speed (0.25x to 4.0x)");
                     });
 
+                    // Spacebar to toggle playback
+                    if ctx.input(|i| i.key_pressed(egui::Key::Space)) && !ctx.wants_keyboard_input()
+                    {
+                        self.playing = !self.playing;
+                    }
+
                     ui.add_space(8.0);
                     ui.label(format!("Position: {} ms", self.position_ms));
 
                     // Simple timeline visualization
-                    let fraction = if rs.duration.num_milliseconds() > 0 {
-                        (self.position_ms as f64) / (rs.duration.num_milliseconds() as f64)
+                    let duration_ms = rs.duration.num_milliseconds();
+                    let fraction = if duration_ms > 0 {
+                        (self.position_ms as f64) / (duration_ms as f64)
                     } else {
                         0.0
                     };
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 30.0),
-                        egui::Sense::hover(),
+                        egui::Sense::click(),
                     );
-                    response.on_hover_text(format!("Playback progress: {:.0}%", fraction * 100.0));
+
+                    if response.clicked() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let rel_x = pos.x - rect.min.x;
+                            let new_fraction = (rel_x / rect.width()).clamp(0.0, 1.0);
+                            self.position_ms = (new_fraction as f64 * duration_ms as f64) as i64;
+                        }
+                    }
+
+                    response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(format!(
+                            "Playback progress: {:.0}% (Click to seek)",
+                            fraction * 100.0
+                        ));
 
                     ui.painter()
                         .rect_filled(rect, 4.0, egui::Color32::DARK_GRAY);
