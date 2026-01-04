@@ -321,15 +321,25 @@ impl EventRecorder {
             return None;
         }
 
-        match fs::read(path) {
-            Ok(content) => {
-                let mut hasher = Sha256::new();
-                hasher.update(&content);
-                let result = hasher.finalize();
-                Some(format!("{:x}", result))
+        let mut file = match fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => return None,
+        };
+
+        let mut hasher = Sha256::new();
+        let mut buffer = [0; 8192]; // 8KB buffer
+        use std::io::Read;
+
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => hasher.update(&buffer[..n]),
+                Err(_) => return None,
             }
-            Err(_) => None,
         }
+
+        let result = hasher.finalize();
+        Some(format!("{:x}", result))
     }
 }
 
