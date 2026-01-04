@@ -34,6 +34,13 @@ impl Default for TimeLoopGui {
 
 impl eframe::App for TimeLoopGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Keyboard shortcuts
+        if !ctx.wants_keyboard_input() {
+            if ctx.input(|i| i.key_pressed(egui::Key::Space)) && self.replay_summary.is_some() {
+                self.playing = !self.playing;
+            }
+        }
+
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.heading("TimeLoop Terminal (GUI)");
         });
@@ -97,7 +104,7 @@ impl eframe::App for TimeLoopGui {
                     ui.horizontal(|ui| {
                         if ui
                             .button(if self.playing { "Pause" } else { "Play" })
-                            .on_hover_text("Start or pause session playback")
+                            .on_hover_text("Start or pause session playback (Space)")
                             .clicked()
                         {
                             self.playing = !self.playing;
@@ -162,7 +169,7 @@ impl eframe::App for TimeLoopGui {
 
 fn main() {
     let options = eframe::NativeOptions::default();
-    eframe::run_native(
+    let _ = eframe::run_native(
         "TimeLoop Terminal GUI",
         options,
         Box::new(|_cc| Box::new(TimeLoopGui::default())),
