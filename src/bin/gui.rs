@@ -97,7 +97,7 @@ impl eframe::App for TimeLoopGui {
                     ui.horizontal(|ui| {
                         if ui
                             .button(if self.playing { "Pause" } else { "Play" })
-                            .on_hover_text("Start or pause session playback")
+                            .on_hover_text("Start or pause session playback (Space)")
                             .clicked()
                         {
                             self.playing = !self.playing;
@@ -112,6 +112,11 @@ impl eframe::App for TimeLoopGui {
                         ui.add(egui::Slider::new(&mut self.speed, 0.25..=4.0).text("Speed"))
                             .on_hover_text("Adjust playback speed (0.25x to 4.0x)");
                     });
+
+                    // Handle global shortcuts
+                    if ctx.input(|i| i.key_pressed(egui::Key::Space)) && !ctx.wants_keyboard_input() {
+                        self.playing = !self.playing;
+                    }
 
                     ui.add_space(8.0);
                     ui.label(format!("Position: {} ms", self.position_ms));
@@ -162,7 +167,7 @@ impl eframe::App for TimeLoopGui {
 
 fn main() {
     let options = eframe::NativeOptions::default();
-    eframe::run_native(
+    let _ = eframe::run_native(
         "TimeLoop Terminal GUI",
         options,
         Box::new(|_cc| Box::new(TimeLoopGui::default())),
