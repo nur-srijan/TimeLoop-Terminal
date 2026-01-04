@@ -124,9 +124,22 @@ impl eframe::App for TimeLoopGui {
                     };
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 30.0),
-                        egui::Sense::hover(),
+                        egui::Sense::click_and_drag(),
                     );
-                    response.on_hover_text(format!("Playback progress: {:.0}%", fraction * 100.0));
+                    let response = response
+                        .on_hover_text(format!("Playback progress: {:.0}%", fraction * 100.0));
+
+                    if response.clicked() || response.dragged() {
+                        if let Some(ptr_pos) = response.interact_pointer_pos() {
+                            let x = ptr_pos.x - rect.min.x;
+                            let w = rect.width();
+                            let new_fraction = (x / w).clamp(0.0, 1.0);
+                            self.position_ms =
+                                (new_fraction as f64 * rs.duration.num_milliseconds() as f64)
+                                    as i64;
+                            // Optional: pause while seeking or let it continue? Let's keep it simple.
+                        }
+                    }
 
                     ui.painter()
                         .rect_filled(rect, 4.0, egui::Color32::DARK_GRAY);
@@ -136,6 +149,13 @@ impl eframe::App for TimeLoopGui {
                     );
                     ui.painter()
                         .rect_filled(filled, 4.0, egui::Color32::LIGHT_GREEN);
+
+                    // Keyboard shortcuts
+                    if !ctx.wants_keyboard_input()
+                        && ctx.input(|i| i.key_pressed(egui::Key::Space))
+                    {
+                        self.playing = !self.playing;
+                    }
 
                     // Playback advancement
                     if self.playing {
