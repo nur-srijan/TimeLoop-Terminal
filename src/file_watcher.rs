@@ -107,6 +107,9 @@ impl FileWatcher {
                 }
             }
 
+            // Pre-process ignore patterns to avoid parsing them for every file event
+            let matcher = PatternMatcher::new(&ignore_patterns);
+
             // Process file system events
             loop {
                 match notify_rx.recv() {
@@ -118,26 +121,7 @@ impl FileWatcher {
                                     // Optimization: Calculate path string once for all pattern checks
                                     // and avoid cloning the ignore_patterns vector
                                     let path_str = path.to_string_lossy();
-
-                                    !ignore_patterns.iter().any(|pattern| {
-                                        if pattern.contains('*') {
-                                            // Simple glob matching
-                                            if pattern == "*" {
-                                                return true;
-                                            }
-                                            if pattern.starts_with("*.") {
-                                                let ext = &pattern[1..];
-                                                return path_str.ends_with(ext);
-                                            }
-                                            if pattern.ends_with("*") {
-                                                let prefix = &pattern[..pattern.len() - 1];
-                                                return path_str.starts_with(prefix);
-                                            }
-                                            false
-                                        } else {
-                                            path_str.contains(pattern)
-                                        }
-                                    })
+                                    !matcher.matches(&path_str)
                                 })
                             }
                         };
@@ -216,6 +200,53 @@ impl FileWatcher {
 
     pub fn get_ignore_patterns(&self) -> &Vec<String> {
         &self.ignore_patterns
+    }
+}
+
+struct PatternMatcher {
+    match_all: bool,
+    extensions: Vec<String>,
+    prefixes: Vec<String>,
+    substrings: Vec<String>,
+}
+
+impl PatternMatcher {
+    fn new(patterns: &[String]) -> Self {
+        let mut matcher = Self {
+            match_all: false,
+            extensions: Vec::new(),
+            prefixes: Vec::new(),
+            substrings: Vec::new(),
+        };
+
+        for pattern in patterns {
+            if pattern == "*" {
+                matcher.match_all = true;
+            } else if pattern.starts_with("*.") {
+                matcher.extensions.push(pattern[1..].to_string());
+            } else if pattern.ends_with("*") {
+                matcher.prefixes.push(pattern[..pattern.len() - 1].to_string());
+            } else if !pattern.contains('*') {
+                matcher.substrings.push(pattern.clone());
+            }
+        }
+        matcher
+    }
+
+    fn matches(&self, path_str: &str) -> bool {
+        if self.match_all {
+            return true;
+        }
+        if self.extensions.iter().any(|ext| path_str.ends_with(ext)) {
+            return true;
+        }
+        if self.prefixes.iter().any(|pre| path_str.starts_with(pre)) {
+            return true;
+        }
+        if self.substrings.iter().any(|sub| path_str.contains(sub)) {
+            return true;
+        }
+        false
     }
 }
 
