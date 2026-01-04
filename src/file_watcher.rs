@@ -11,25 +11,102 @@ use tokio::sync::Mutex;
 pub type FileChangeCallback =
     Arc<Mutex<dyn Fn(&str, FileChangeType) -> crate::Result<()> + Send + Sync>>;
 
+#[derive(Clone, Debug)]
+struct PatternMatcher {
+    exact: Vec<String>,
+    extensions: Vec<String>,
+    prefixes: Vec<String>,
+    substrings: Vec<String>,
+    match_all: bool,
+}
+
+impl PatternMatcher {
+    fn new(patterns: &[String]) -> Self {
+        let mut exact = Vec::new();
+        let mut extensions = Vec::new();
+        let mut prefixes = Vec::new();
+        let mut substrings = Vec::new();
+        let mut match_all = false;
+
+        for pattern in patterns {
+            if pattern == "*" {
+                match_all = true;
+                continue;
+            }
+            if pattern.starts_with("*.") {
+                extensions.push(pattern[1..].to_string());
+                continue;
+            }
+            if pattern.ends_with("*") {
+                prefixes.push(pattern[..pattern.len() - 1].to_string());
+                continue;
+            }
+
+            if pattern.contains('*') {
+                exact.push(pattern.clone());
+            } else {
+                substrings.push(pattern.clone());
+            }
+        }
+        Self {
+            exact,
+            extensions,
+            prefixes,
+            substrings,
+            match_all,
+        }
+    }
+
+    fn matches(&self, path: &str) -> bool {
+        if self.match_all {
+            return true;
+        }
+
+        if self.extensions.iter().any(|ext| path.ends_with(ext)) {
+            return true;
+        }
+        if self
+            .prefixes
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+        {
+            return true;
+        }
+        if self.substrings.iter().any(|sub| path.contains(sub)) {
+            return true;
+        }
+        if self.exact.iter().any(|p| p == path) {
+            return true;
+        }
+
+        false
+    }
+}
+
 pub struct FileWatcher {
     file_change_callback: FileChangeCallback,
     watched_paths: HashMap<PathBuf, bool>,
     ignore_patterns: Vec<String>,
+    matcher: PatternMatcher,
 }
 
 impl FileWatcher {
     pub fn new(file_change_callback: FileChangeCallback) -> crate::Result<Self> {
+        let ignore_patterns = vec![
+            ".git".to_string(),
+            "target".to_string(),
+            "node_modules".to_string(),
+            ".DS_Store".to_string(),
+            "*.tmp".to_string(),
+            "*.log".to_string(),
+        ];
+        let matcher = PatternMatcher::new(&ignore_patterns);
+
         Ok(Self {
             file_change_callback,
             watched_paths: HashMap::new(),
-            ignore_patterns: vec![
-                ".git".to_string(),
-                "target".to_string(),
-                "node_modules".to_string(),
-                ".DS_Store".to_string(),
-                "*.tmp".to_string(),
-                "*.log".to_string(),
-            ],
+            ignore_patterns,
+            matcher,
         })
     }
 
@@ -45,42 +122,12 @@ impl FileWatcher {
 
     pub fn add_ignore_pattern(&mut self, pattern: String) {
         self.ignore_patterns.push(pattern);
+        self.matcher = PatternMatcher::new(&self.ignore_patterns);
     }
 
     pub fn should_ignore(&self, path: &PathBuf) -> bool {
         let path_str = path.to_string_lossy();
-
-        for pattern in &self.ignore_patterns {
-            if pattern.contains('*') {
-                // Simple glob pattern matching
-                if self.matches_glob(&path_str, pattern) {
-                    return true;
-                }
-            } else if path_str.contains(pattern) {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn matches_glob(&self, path: &str, pattern: &str) -> bool {
-        // Simple glob matching - can be enhanced with a proper glob library
-        if pattern == "*" {
-            return true;
-        }
-
-        if pattern.starts_with("*.") {
-            let ext = &pattern[1..];
-            return path.ends_with(ext);
-        }
-
-        if pattern.ends_with("*") {
-            let prefix = &pattern[..pattern.len() - 1];
-            return path.starts_with(prefix);
-        }
-
-        path == pattern
+        self.matcher.matches(&path_str)
     }
 
     pub async fn start_watching(&mut self) -> crate::Result<()> {
@@ -88,7 +135,7 @@ impl FileWatcher {
 
         // Spawn the file watcher in a separate thread
         let watched_paths = self.watched_paths.clone();
-        let ignore_patterns = self.ignore_patterns.clone();
+        let matcher = self.matcher.clone();
 
         std::thread::spawn(move || {
             let (notify_tx, notify_rx) = mpsc::channel();
@@ -112,35 +159,13 @@ impl FileWatcher {
                 match notify_rx.recv() {
                     Ok(Ok(event)) => {
                         // Filter out ignored files
-                        let should_process = match &event {
-                            notify::Event { paths, .. } => {
-                                paths.iter().all(|path| {
-                                    // Optimization: Calculate path string once for all pattern checks
-                                    // and avoid cloning the ignore_patterns vector
-                                    let path_str = path.to_string_lossy();
-
-                                    !ignore_patterns.iter().any(|pattern| {
-                                        if pattern.contains('*') {
-                                            // Simple glob matching
-                                            if pattern == "*" {
-                                                return true;
-                                            }
-                                            if pattern.starts_with("*.") {
-                                                let ext = &pattern[1..];
-                                                return path_str.ends_with(ext);
-                                            }
-                                            if pattern.ends_with("*") {
-                                                let prefix = &pattern[..pattern.len() - 1];
-                                                return path_str.starts_with(prefix);
-                                            }
-                                            false
-                                        } else {
-                                            path_str.contains(pattern)
-                                        }
-                                    })
-                                })
-                            }
-                        };
+                        let notify::Event { paths, .. } = &event;
+                        let should_process = paths.iter().all(|path| {
+                            // Optimization: Calculate path string once for all pattern checks
+                            // and use optimized matcher
+                            let path_str = path.to_string_lossy();
+                            !matcher.matches(&path_str)
+                        });
 
                         if should_process {
                             if let Err(e) = tx.blocking_send(event) {
