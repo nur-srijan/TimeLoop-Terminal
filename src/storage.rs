@@ -1,47 +1,30 @@
 use std::collections::HashMap;
-use std::fs;
-use std::io::{ BufRead, Read, Seek, Write};
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, Read, Seek, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::sync::{RwLock, Arc};
-use std::thread;
-use std::time::Duration;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::path::PathBuf;
-use chrono::{DateTime, Utc};
-use once_cell::sync::{Lazy, OnceCell};
-use serde::{Deserialize, Serialize};
-use crate::Event;
-use crate::session::Session;
-use crate::branch::TimelineBranch;
-use argon2::Argon2;
-use base64;
-use base64::engine::general_purpose;
-use base64::Engine as _;
-use chacha20poly1305;
-use rand::RngCore;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs;
-use std::io::{BufRead, Read, Seek, Write as _};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
+
+use argon2::Argon2;
+use base64::{engine::general_purpose, Engine as _};
+use chrono::{DateTime, Utc};
+use once_cell::sync::{Lazy, OnceCell};
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
-use crate::Event;
-use crate::session::Session;
+
 use crate::branch::TimelineBranch;
+use crate::session::Session;
+use crate::Event;
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct StorageInner {
-    #[zeroize(skip)]
     events: HashMap<String, Vec<Event>>,       // session_id -> events
-    #[zeroize(skip)]
     sessions: HashMap<String, Session>,        // session_id -> session
-    #[zeroize(skip)]
     branches: HashMap<String, TimelineBranch>, // branch_id -> branch
 }
 

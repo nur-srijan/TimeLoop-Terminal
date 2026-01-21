@@ -652,7 +652,7 @@ impl TimeLoopGui {
 
 fn main() {
     let options = eframe::NativeOptions::default();
-    eframe::run_native(
+    let _ = eframe::run_native(
         "TimeLoop Terminal GUI",
         options,
         Box::new(|_cc| Box::new(TimeLoopGui::default())),
