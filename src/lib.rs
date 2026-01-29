@@ -8,6 +8,8 @@ pub mod replay;
 pub mod session;
 pub mod storage;
 pub mod terminal;
+pub mod gpu_renderer;
+pub mod gpu_terminal;
 
 pub use branch::{BranchManager, TimelineBranch};
 pub use error::TimeLoopError;
@@ -15,7 +17,8 @@ pub use events::{Event, EventRecorder, EventType, FileChangeType};
 pub use replay::ReplayEngine;
 pub use session::{Session, SessionManager, SessionSummary};
 pub use storage::Storage;
-pub use terminal::TerminalEmulator;
+pub use gpu_renderer::{GpuRenderer, GlyphInstance, Uniforms};
+pub use gpu_terminal::GpuTerminalEmulator;
 
 /// Re-export commonly used types
 pub type Result<T> = std::result::Result<T, TimeLoopError>;

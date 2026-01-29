@@ -39,7 +39,10 @@ pub enum TimeLoopError {
 
     #[error("Configuration error: {0}")]
     Configuration(String),
-
+    
+    #[error("GPU rendering error: {0}")]
+    GpuError(String),
+    
     #[error("Unknown error: {0}")]
     Unknown(String),
 }

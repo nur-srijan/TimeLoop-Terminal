@@ -33,6 +33,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = "0.3"
+env_logger = "0.10"
 
 # Error handling
 anyhow = "1.0"
@@ -47,27 +48,39 @@ reqwest = { version = "0.11", features = ["json"], optional = true }
 # GUI using eframe/egui (optional)
 eframe = { version = "0.24", optional = true }
 
+# GPU rendering dependencies
+wgpu = "0.20"
+winit = "0.30"
+bytemuck = { version = "1.14", features = ["derive"] }
+glam = "0.25"
+
 rand = "0.8"
 
 # Crypto and redaction dependencies
 chacha20poly1305 = "0.10"
 argon2 = "0.4"
-zeroize = "1.5"
+zeroize = { version = "1.5", features = ["derive"] }
 base64 = "0.21"
 regex = "1.11"
+glob = "0.3.3"
 sha2 = "0.10.9"
 
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.10"
 
-[features]
-default = []
-ai = ["dep:reqwest"]
-gui = ["dep:eframe"]
-all = ["dep:reqwest", "dep:eframe"]
+[[bin]]
+name = "gpu_gui"
+path = "src/bin/gpu_gui.rs"
+required-features = ["gui"]
 
 [[bin]]
 name = "gui"
 path = "src/bin/gui.rs"
 required-features = ["gui"]
+
+[features]
+default = []
+ai = ["dep:reqwest"]
+gui = ["dep:eframe"]
+all = ["dep:reqwest", "dep:eframe"]
