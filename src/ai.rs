@@ -30,10 +30,10 @@ struct ChatMessageOut {
 }
 
 fn build_timeline(storage: &Storage, session_id: &str, max_items: usize) -> crate::Result<String> {
-    let mut events = storage.get_events_for_session(session_id)?;
+    let mut events = storage.get_last_n_events(session_id, max_items)?;
     events.sort_by_key(|e| e.sequence_number);
     let mut lines: Vec<String> = Vec::new();
-    for e in events.into_iter().rev().take(max_items).rev() {
+    for e in events.into_iter() {
         match e.event_type {
             EventType::Command {
                 ref command,

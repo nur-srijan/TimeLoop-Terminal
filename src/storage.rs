@@ -464,6 +464,29 @@ impl Storage {
         Ok(events.last().cloned())
     }
 
+    pub fn get_last_n_events(
+        &self,
+        session_id: &str,
+        n: usize,
+    ) -> crate::Result<Vec<Event>> {
+        self.with_read(|guard| {
+            guard
+                .events
+                .get(session_id)
+                .map(|events| {
+                    let len = events.len();
+                    if n >= len {
+                        return events.clone();
+                    }
+
+                    let mut events = events.clone();
+                    events.select_nth_unstable_by_key(len - n, |e| e.sequence_number);
+                    events.split_off(len - n)
+                })
+                .unwrap_or_default()
+        })
+    }
+
     pub fn clear_session_events(&self, session_id: &str) -> crate::Result<()> {
         self.with_write(|guard| {
             guard.events.remove(session_id);
