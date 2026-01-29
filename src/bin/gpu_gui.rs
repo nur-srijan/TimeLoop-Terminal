@@ -5,7 +5,6 @@ use timeloop_terminal::{SessionManager, ReplayEngine, GpuRenderer};
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
 };
 
 // GPU-enabled GUI app that demonstrates text rendering
@@ -39,29 +38,6 @@ impl Default for TimeLoopGpuGui {
             gpu_renderer: None,
             demo_text: "Hello, TimeLoop Terminal! This is GPU-rendered text.".to_string(),
             time: 0.0,
-        }
-    }
-}
-
-impl TimeLoopGpuGui {
-    fn init_gpu_renderer(&mut self, window: &winit::window::Window) {
-        if self.gpu_renderer.is_none() {
-            // Initialize GPU renderer asynchronously
-            let window = window.clone();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async {
-                    match GpuRenderer::new(&window).await {
-                        Ok(renderer) => {
-                            // In a real implementation, we'd send this back to the main thread
-                            println!("GPU renderer initialized successfully");
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to initialize GPU renderer: {}", e);
-                        }
-                    }
-                });
-            });
         }
     }
 }
@@ -205,8 +181,8 @@ fn main() {
             .with_title("TimeLoop Terminal - GPU Rendering Demo"),
         ..Default::default()
     };
-    
-    eframe::run_native(
+
+    let _ = eframe::run_native(
         "TimeLoop Terminal GPU Demo",
         options,
         Box::new(|_cc| Box::new(TimeLoopGpuGui::default())),
