@@ -8,8 +8,9 @@ use crossterm::{
 use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use tokio::process::Command;
 use tokio::task::JoinHandle;
 
 pub struct TerminalEmulator {
@@ -333,6 +334,7 @@ impl TerminalEmulator {
 
         let output = cmd
             .output()
+            .await
             .map_err(|e| TimeLoopError::CommandExecution(e.to_string()))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -403,5 +405,48 @@ mod tests {
 
         // If we get here, the test passes
         assert!(true);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_blocking_behavior() {
+        // Setup
+        let tmp_dir = TempDir::new().unwrap();
+        let db_path = tmp_dir.path().join("events_bench.db");
+        let storage = crate::storage::Storage::with_path(db_path.to_str().unwrap()).unwrap();
+        let mut session_manager = crate::session::SessionManager::with_storage(storage);
+        let session_id = session_manager.create_session("bench-test").unwrap();
+
+        let event_db_path = tmp_dir.path().join("events_bench_rec.db");
+        let event_storage = crate::storage::Storage::with_path(event_db_path.to_str().unwrap()).unwrap();
+        let event_recorder = crate::events::EventRecorder::with_storage(&session_id, event_storage);
+        let terminal = TerminalEmulator::new(event_recorder).unwrap();
+
+        // Shared counter
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        // Start background task
+        let _handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+
+        // Give it a moment to start
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let start_count = counter.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Run sleep command for 1 second
+        let cmd = if cfg!(target_os = "windows") { "Start-Sleep -Seconds 1" } else { "sleep 1" };
+
+        let _ = terminal.execute_external_command(cmd).await.unwrap();
+
+        let end_count = counter.load(std::sync::atomic::Ordering::Relaxed);
+        let diff = end_count - start_count;
+
+        println!("Counter diff: {}", diff);
+
+        assert!(diff > 50, "Expected non-blocking behavior, but counter only increased by {}", diff);
     }
 }
