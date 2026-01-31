@@ -5,7 +5,8 @@ use std::io::{BufRead, Read, Seek, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -52,6 +53,79 @@ impl Drop for StorageInner {
 
 // Atomic counter for tracking pending write operations to reduce lock contention
 static PENDING_WRITES: AtomicU32 = AtomicU32::new(0);
+
+enum WriteCommand {
+    Overwrite {
+        path: PathBuf,
+        content: Vec<u8>,
+        resp: Option<Sender<Result<(), String>>>,
+    },
+}
+
+static WRITE_QUEUE: Lazy<Mutex<SyncSender<WriteCommand>>> = Lazy::new(|| {
+    let (tx, rx) = sync_channel(1000);
+    thread::spawn(move || {
+        while let Ok(cmd) = rx.recv() {
+            match cmd {
+                WriteCommand::Overwrite {
+                    path,
+                    content,
+                    resp,
+                } => {
+                    let parent = path
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    let mut tmp = parent.join(".tmp_timeloop");
+                    let mut osrng = rand::rngs::OsRng;
+                    let suffix: u64 = osrng.next_u64();
+                    tmp = tmp.with_extension(format!("{}.tmp", suffix));
+
+                    #[allow(unused_mut)]
+                    let mut options = OpenOptions::new();
+                    options.write(true).create(true).truncate(true);
+
+                    #[cfg(unix)]
+                    {
+                        options.mode(0o600);
+                    }
+
+                    let mut result = Ok(());
+
+                    match options.open(&tmp) {
+                        Ok(mut file) => {
+                            if let Err(e) = file.write_all(&content) {
+                                let msg =
+                                    format!("Failed to write tmp file {}: {}", tmp.display(), e);
+                                tracing::error!("{}", msg);
+                                result = Err(msg);
+                            } else if let Err(e) = std::fs::rename(&tmp, &path) {
+                                let msg = format!(
+                                    "Failed to rename {} to {}: {}",
+                                    tmp.display(),
+                                    path.display(),
+                                    e
+                                );
+                                tracing::error!("{}", msg);
+                                result = Err(msg);
+                            }
+                        }
+                        Err(e) => {
+                            let msg = format!("Failed to open tmp file {}: {}", tmp.display(), e);
+                            tracing::error!("{}", msg);
+                            result = Err(msg);
+                        }
+                    }
+
+                    if let Some(resp_tx) = resp {
+                        let _ = resp_tx.send(result);
+                    }
+                }
+            }
+        }
+    });
+    Mutex::new(tx)
+});
 
 static GLOBAL_STORAGE: Lazy<RwLock<StorageInner>> = Lazy::new(|| RwLock::new(StorageInner::default()));
 
@@ -434,9 +508,9 @@ impl Storage {
         if self.append_only {
             let _ = self.append_event_to_log(event);
         } else if let Some(path) = &self.persistence_path {
-            let _ = Self::save_to_path(path, self);
+            let _ = Self::save_to_path(path, self, false);
         } else if self.inner.is_none() {
-            let _ = Self::save_to_disk();
+            let _ = Self::save_to_disk(false);
         }
         Ok(())
     }
@@ -492,9 +566,9 @@ impl Storage {
             guard.events.remove(session_id);
         })?;
         if let Some(path) = &self.persistence_path {
-            let _ = Self::save_to_path(path, self);
+            let _ = Self::save_to_path(path, self, true);
         } else if self.inner.is_none() {
-            let _ = Self::save_to_disk();
+            let _ = Self::save_to_disk(true);
         }
         Ok(())
     }
@@ -505,9 +579,9 @@ impl Storage {
             guard.sessions.insert(session.id.clone(), session.clone());
         })?;
         if let Some(path) = &self.persistence_path {
-            let _ = Self::save_to_path(path, self);
+            let _ = Self::save_to_path(path, self, true);
         } else if self.inner.is_none() {
-            let _ = Self::save_to_disk();
+            let _ = Self::save_to_disk(true);
         }
         Ok(())
     }
@@ -530,9 +604,9 @@ impl Storage {
             guard.branches.insert(branch.id.clone(), branch.clone());
         })?;
         if let Some(path) = &self.persistence_path {
-            let _ = Self::save_to_path(path, self);
+            let _ = Self::save_to_path(path, self, true);
         } else if self.inner.is_none() {
-            let _ = Self::save_to_disk();
+            let _ = Self::save_to_disk(true);
         }
         Ok(())
     }
@@ -555,9 +629,9 @@ impl Storage {
             guard.sessions.remove(session_id);
         })?;
         if let Some(path) = &self.persistence_path {
-            let _ = Self::save_to_path(path, self);
+            let _ = Self::save_to_path(path, self, true);
         } else if self.inner.is_none() {
-            let _ = Self::save_to_disk();
+            let _ = Self::save_to_disk(true);
         }
         Ok(())
     }
@@ -568,9 +642,9 @@ impl Storage {
             guard.branches.remove(branch_id);
         })?;
         if let Some(path) = &self.persistence_path {
-            let _ = Self::save_to_path(path, self);
+            let _ = Self::save_to_path(path, self, true);
         } else if self.inner.is_none() {
-            let _ = Self::save_to_disk();
+            let _ = Self::save_to_disk(true);
         }
         Ok(())
     }
@@ -678,48 +752,50 @@ impl Storage {
 
     pub fn flush(&self) -> crate::Result<()> {
         if let Some(path) = &self.persistence_path {
-            Self::save_to_path(path, self)
+            Self::save_to_path(path, self, true)?;
         } else {
-            Self::save_to_disk()
+            Self::save_to_disk(true)?;
         }
+        Ok(())
     }
 
     // Helper to atomically write bytes to a file path. Writes to a temporary file in
     // the same directory and then renames into place.
-    fn atomic_write(path: &PathBuf, bytes: &[u8]) -> crate::Result<()> {
-        // If path has no parent (e.g., filename in current dir) use current directory
-        let parent = path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let mut tmp = parent.join(".tmp_timeloop");
-        // add a random suffix to avoid collisions
-        let mut osrng = rand::rngs::OsRng;
-        let suffix: u64 = osrng.next_u64();
-        tmp = tmp.with_extension(format!("{}.tmp", suffix));
+    fn atomic_write(path: &std::path::Path, bytes: &[u8], sync: bool) -> crate::Result<()> {
+        let (tx, rx) = if sync {
+            let (tx, rx) = channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
 
-        // Write tmp file with secure permissions
-        #[allow(unused_mut)]
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        // Queue the write operation to background thread
+        let cmd = WriteCommand::Overwrite {
+            path: path.to_path_buf(),
+            content: bytes.to_vec(),
+            resp: tx,
+        };
 
-        #[cfg(unix)]
-        {
-            options.mode(0o600);
+        if let Ok(guard) = WRITE_QUEUE.lock() {
+            guard
+                .send(cmd)
+                .map_err(|e| crate::error::TimeLoopError::Storage(format!("Background write queue failed: {}", e)))?;
+        } else {
+            return Err(crate::error::TimeLoopError::Storage("Failed to lock write queue".to_string()));
         }
 
-        let mut file = options.open(&tmp)
-            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-        file.write_all(bytes)
-            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-
-        // Rename into place (atomic on most platforms when on same filesystem)
-        std::fs::rename(&tmp, path)
-            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-        Ok(())
+        if let Some(rx) = rx {
+            match rx.recv() {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(crate::error::TimeLoopError::FileSystem(e)),
+                Err(_) => Err(crate::error::TimeLoopError::Storage("Background thread disconnected".to_string())),
+            }
+        } else {
+            Ok(())
+        }
     }
 
-    fn save_to_disk() -> crate::Result<()> {
+    fn save_to_disk(sync: bool) -> crate::Result<()> {
         let dir = Self::data_dir();
         fs::create_dir_all(&dir)
             .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
@@ -729,7 +805,7 @@ impl Storage {
             .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
         let data = serde_json::to_string_pretty(&*guard)?;
         // atomic write
-        Self::atomic_write(&path, data.as_bytes())?;
+        Self::atomic_write(&path, data.as_bytes(), sync)?;
         Ok(())
     }
 
@@ -738,9 +814,9 @@ impl Storage {
     pub fn compact(&self) -> crate::Result<()> {
         // Persist current snapshot
         if let Some(path) = &self.persistence_path {
-            Self::save_to_path(path, self)?;
+            Self::save_to_path(path, self, true)?;
         } else if self.inner.is_none() {
-            Self::save_to_disk()?;
+            Self::save_to_disk(true)?;
         }
 
         // Rotate/truncate events log
@@ -1064,7 +1140,7 @@ impl Storage {
 
     // Save to a per-instance path. Serialize the current inner state (either global
     // or the instance's inner) and write it to the provided path.
-    fn save_to_path(path: &PathBuf, storage: &Storage) -> crate::Result<()> {
+    fn save_to_path(path: &std::path::Path, storage: &Storage, sync: bool) -> crate::Result<()> {
         // Determine which inner to read from
         let data_inner = if let Some(inner) = &storage.inner {
             inner
@@ -1101,7 +1177,7 @@ impl Storage {
                         ciphertext: general_purpose::STANDARD.encode(&ciphertext),
                     };
                     let wrapper_json = serde_json::to_string_pretty(&wrapper)?;
-                    Self::atomic_write(path, wrapper_json.as_bytes())?;
+                    Self::atomic_write(path, wrapper_json.as_bytes(), sync)?;
                 }
                 PersistenceFormat::Cbor => {
                     let wrapper_cbor = EncryptedFileCbor {
@@ -1110,14 +1186,14 @@ impl Storage {
                         ciphertext,
                     };
                     let wrapper_bytes = serde_cbor::to_vec(&wrapper_cbor)?;
-                    Self::atomic_write(path, &wrapper_bytes)?;
+                    Self::atomic_write(path, &wrapper_bytes, sync)?;
                 }
             }
             // zeroize plaintext
             data_bytes.zeroize();
         } else {
             // Unencrypted path: write according to format directly
-            Self::atomic_write(path, data_bytes.as_slice())?;
+            Self::atomic_write(path, data_bytes.as_slice(), sync)?;
             data_bytes.zeroize();
         }
         Ok(())
@@ -1217,7 +1293,7 @@ impl Storage {
             ciphertext: general_purpose::STANDARD.encode(&ciphertext),
         };
         let wrapper_json = serde_json::to_string_pretty(&wrapper)?;
-        Self::atomic_write(path, wrapper_json.as_bytes())?;
+        Self::atomic_write(path, wrapper_json.as_bytes(), true)?;
 
         // Zeroize and replace old key material
         if let Some(mut old_key) = self.encryption_key.take() {
