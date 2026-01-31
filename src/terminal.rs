@@ -426,7 +426,7 @@ mod tests {
         let counter_clone = counter.clone();
 
         // Start background task
-        let _handle = tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -446,6 +446,9 @@ mod tests {
         let diff = end_count - start_count;
 
         println!("Counter diff: {}", diff);
+
+        // Clean up background task
+        handle.abort();
 
         assert!(diff > 50, "Expected non-blocking behavior, but counter only increased by {}", diff);
     }
