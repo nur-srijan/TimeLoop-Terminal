@@ -69,53 +69,62 @@ static WRITE_QUEUE: Lazy<Mutex<SyncSender<WriteCommand>>> = Lazy::new(|| {
             match cmd {
                 WriteCommand::Overwrite {
                     path,
-                    content,
+                    mut content,
                     resp,
                 } => {
-                    let parent = path
-                        .parent()
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or_else(|| std::path::PathBuf::from("."));
-                    let mut tmp = parent.join(".tmp_timeloop");
-                    let mut osrng = rand::rngs::OsRng;
-                    let suffix: u64 = osrng.next_u64();
-                    tmp = tmp.with_extension(format!("{}.tmp", suffix));
+                    let perform_write = || -> Result<(), String> {
+                        let parent = path
+                            .parent()
+                            .map(|p| p.to_path_buf())
+                            .unwrap_or_else(|| std::path::PathBuf::from("."));
+                        let mut tmp = parent.join(".tmp_timeloop");
+                        let mut osrng = rand::rngs::OsRng;
+                        let suffix: u64 = osrng.next_u64();
+                        tmp = tmp.with_extension(format!("{}.tmp", suffix));
 
-                    #[allow(unused_mut)]
-                    let mut options = OpenOptions::new();
-                    options.write(true).create(true).truncate(true);
+                        #[allow(unused_mut)]
+                        let mut options = OpenOptions::new();
+                        options.write(true).create(true).truncate(true);
 
-                    #[cfg(unix)]
-                    {
-                        options.mode(0o600);
+                        #[cfg(unix)]
+                        {
+                            options.mode(0o600);
+                        }
+
+                        let mut file = options
+                            .open(&tmp)
+                            .map_err(|e| format!("Failed to open tmp file {}: {}", tmp.display(), e))?;
+
+                        file.write_all(&content)
+                            .map_err(|e| format!("Failed to write tmp file {}: {}", tmp.display(), e))?;
+
+                        std::fs::rename(&tmp, &path).map_err(|e| {
+                            format!(
+                                "Failed to rename {} to {}: {}",
+                                tmp.display(),
+                                path.display(),
+                                e
+                            )
+                        })?;
+                        Ok(())
+                    };
+
+                    let result = perform_write();
+
+                    if let Err(ref msg) = result {
+                        tracing::error!("{}", msg);
                     }
 
-                    let mut result = Ok(());
-
-                    match options.open(&tmp) {
-                        Ok(mut file) => {
-                            if let Err(e) = file.write_all(&content) {
-                                let msg =
-                                    format!("Failed to write tmp file {}: {}", tmp.display(), e);
-                                tracing::error!("{}", msg);
-                                result = Err(msg);
-                            } else if let Err(e) = std::fs::rename(&tmp, &path) {
-                                let msg = format!(
-                                    "Failed to rename {} to {}: {}",
-                                    tmp.display(),
-                                    path.display(),
-                                    e
-                                );
-                                tracing::error!("{}", msg);
-                                result = Err(msg);
-                            }
-                        }
-                        Err(e) => {
-                            let msg = format!("Failed to open tmp file {}: {}", tmp.display(), e);
-                            tracing::error!("{}", msg);
-                            result = Err(msg);
-                        }
-                    }
+                    // Zeroize content after writing
+                    // Since Vec<u8> doesn't impl Zeroize directly without feature flags on some versions,
+                    // and we are inside the crate that uses it, we rely on the zeroize crate being available.
+                    // However, to be safe and compatible with how the rest of the code works (using Zeroize trait),
+                    // we can try to zeroize it. If Vec<u8> doesn't implement it, we might need a loop.
+                    // The project uses `zeroize` with `derive` feature. `u8` implements `Zeroize`.
+                    // But `Vec<u8>` implements `Zeroize` only if `alloc` feature of zeroize is enabled usually.
+                    // Let's assume standard zeroize behavior or do it manually if compilation fails.
+                    // Given previous code called zeroize() on data_bytes (Vec<u8>), it should work here.
+                    content.zeroize();
 
                     if let Some(resp_tx) = resp {
                         let _ = resp_tx.send(result);
@@ -761,7 +770,7 @@ impl Storage {
 
     // Helper to atomically write bytes to a file path. Writes to a temporary file in
     // the same directory and then renames into place.
-    fn atomic_write(path: &std::path::Path, bytes: &[u8], sync: bool) -> crate::Result<()> {
+    fn atomic_write(path: &std::path::Path, content: Vec<u8>, sync: bool) -> crate::Result<()> {
         let (tx, rx) = if sync {
             let (tx, rx) = channel();
             (Some(tx), Some(rx))
@@ -772,7 +781,7 @@ impl Storage {
         // Queue the write operation to background thread
         let cmd = WriteCommand::Overwrite {
             path: path.to_path_buf(),
-            content: bytes.to_vec(),
+            content,
             resp: tx,
         };
 
@@ -805,7 +814,7 @@ impl Storage {
             .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
         let data = serde_json::to_string_pretty(&*guard)?;
         // atomic write
-        Self::atomic_write(&path, data.as_bytes(), sync)?;
+        Self::atomic_write(&path, data.into_bytes(), sync)?;
         Ok(())
     }
 
@@ -1169,6 +1178,10 @@ impl Storage {
                 )
             })?;
             let (nonce, ciphertext) = Self::encrypt_bytes(key, data_bytes.as_slice())?;
+
+            // Zeroize plaintext immediately after encryption
+            data_bytes.zeroize();
+
             match storage.persistence_format {
                 PersistenceFormat::Json => {
                     let wrapper = EncryptedFile {
@@ -1177,7 +1190,7 @@ impl Storage {
                         ciphertext: general_purpose::STANDARD.encode(&ciphertext),
                     };
                     let wrapper_json = serde_json::to_string_pretty(&wrapper)?;
-                    Self::atomic_write(path, wrapper_json.as_bytes(), sync)?;
+                    Self::atomic_write(path, wrapper_json.into_bytes(), sync)?;
                 }
                 PersistenceFormat::Cbor => {
                     let wrapper_cbor = EncryptedFileCbor {
@@ -1186,15 +1199,13 @@ impl Storage {
                         ciphertext,
                     };
                     let wrapper_bytes = serde_cbor::to_vec(&wrapper_cbor)?;
-                    Self::atomic_write(path, &wrapper_bytes, sync)?;
+                    Self::atomic_write(path, wrapper_bytes, sync)?;
                 }
             }
-            // zeroize plaintext
-            data_bytes.zeroize();
         } else {
             // Unencrypted path: write according to format directly
-            Self::atomic_write(path, data_bytes.as_slice(), sync)?;
-            data_bytes.zeroize();
+            // Ownership of data_bytes is passed to atomic_write, which will zeroize it after writing in the background thread.
+            Self::atomic_write(path, data_bytes, sync)?;
         }
         Ok(())
     }
@@ -1293,7 +1304,7 @@ impl Storage {
             ciphertext: general_purpose::STANDARD.encode(&ciphertext),
         };
         let wrapper_json = serde_json::to_string_pretty(&wrapper)?;
-        Self::atomic_write(path, wrapper_json.as_bytes(), true)?;
+        Self::atomic_write(path, wrapper_json.into_bytes(), true)?;
 
         // Zeroize and replace old key material
         if let Some(mut old_key) = self.encryption_key.take() {
