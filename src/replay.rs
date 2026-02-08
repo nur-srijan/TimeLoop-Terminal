@@ -49,25 +49,18 @@ impl ReplayEngine {
         // Use std::thread instead of spawn_blocking to ensure we have a dedicated thread
         // for blocking poll operations without occupying a thread from the blocking pool forever.
         std::thread::spawn(move || {
-            loop {
-                // Poll with a short timeout to check for exit conditions
-                if let Ok(available) = event::poll(Duration::from_millis(100)) {
-                    if available {
-                        match event::read() {
-                            Ok(evt) => {
-                                if tx.send(evt).is_err() {
-                                    break; // Receiver dropped, stop thread
-                                }
-                            }
-                            Err(_) => break,
+            // Poll with a short timeout to check for exit conditions
+            while let Ok(available) = event::poll(Duration::from_millis(100)) {
+                if available {
+                    if let Ok(evt) = event::read() {
+                        if tx.send(evt).is_err() {
+                            break; // Receiver dropped, stop thread
                         }
                     } else {
-                        // Timeout, check if we should exit
-                        if tx.is_closed() {
-                            break;
-                        }
+                        break;
                     }
-                } else {
+                } else if tx.is_closed() {
+                    // Timeout, check if we should exit
                     break;
                 }
             }
