@@ -2,6 +2,7 @@
 
 use eframe::egui;
 use timeloop_terminal::{ReplayEngine, SessionManager};
+use std::sync::mpsc;
 
 // Enhanced GUI app with comprehensive features
 struct TimeLoopGui {
@@ -31,6 +32,7 @@ struct TimeLoopGui {
     ai_prompt: String,
     ai_response: String,
     ai_analyzing: bool,
+    ai_response_receiver: Option<mpsc::Receiver<timeloop_terminal::Result<String>>>,
     
     // Import/Export
     import_path: String,
@@ -73,6 +75,7 @@ impl Default for TimeLoopGui {
             ai_prompt: String::new(),
             ai_response: String::new(),
             ai_analyzing: false,
+            ai_response_receiver: None,
             import_path: String::new(),
             export_path: String::new(),
             error_message: None,
@@ -83,6 +86,37 @@ impl Default for TimeLoopGui {
 
 impl eframe::App for TimeLoopGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll for AI response
+        let mut response_received = None;
+        if let Some(ref rx) = self.ai_response_receiver {
+            match rx.try_recv() {
+                Ok(result) => {
+                    response_received = Some(result);
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Still waiting
+                    ctx.request_repaint(); // Keep repainting to show animation/status if needed
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                     response_received = Some(Err(timeloop_terminal::error::TimeLoopError::Unknown("AI request channel disconnected unexpectedly".to_string())));
+                }
+            }
+        }
+
+        if let Some(result) = response_received {
+            self.ai_analyzing = false;
+            self.ai_response_receiver = None; // clear receiver
+            match result {
+                Ok(response) => self.ai_response = response,
+                Err(e) => {
+                    let msg = e.to_string();
+                    self.ai_response = format!("Error: {}", msg);
+                    self.error_message = Some(msg);
+                }
+            }
+            ctx.request_repaint();
+        }
+
         // Clear messages after a delay
         if self.error_message.is_some() || self.success_message.is_some() {
             ctx.request_repaint();
@@ -399,10 +433,32 @@ impl TimeLoopGui {
         self.ai_analyzing = true;
         self.ai_response = "Analyzing your request...".to_string();
         
-        // TODO: Implement actual AI request
-        // For now, simulate a response
-        self.ai_response = format!("AI Response to: '{}'\n\nThis is a simulated response. In a real implementation, this would call the selected AI model with your prompt and the current session context.", self.ai_prompt);
-        self.ai_analyzing = false;
+        let prompt = self.ai_prompt.clone();
+        let model = self.ai_model.clone();
+        let api_key = self.api_keys.get("openai").cloned().filter(|s| !s.is_empty());
+
+        let (tx, rx) = mpsc::channel();
+        self.ai_response_receiver = Some(rx);
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+
+            let result = match rt {
+                Ok(rt) => rt.block_on(async {
+                    timeloop_terminal::ai::send_chat_request(
+                        &model,
+                        "You are a helpful assistant.",
+                        &prompt,
+                        api_key
+                    ).await
+                }),
+                Err(e) => Err(timeloop_terminal::error::TimeLoopError::Unknown(e.to_string())),
+            };
+
+            let _ = tx.send(result);
+        });
     }
 
     fn show_about(&mut self) {

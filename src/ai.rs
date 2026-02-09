@@ -69,14 +69,15 @@ fn build_timeline(storage: &Storage, session_id: &str, max_items: usize) -> crat
     Ok(lines.join("\n"))
 }
 
-pub async fn summarize_session(session_id: &str, model: &str) -> crate::Result<String> {
-    let storage = Storage::new()?;
-    let timeline = build_timeline(&storage, session_id, 200)?;
-    let prompt = format!("You are an expert assistant. Summarize the following terminal session succinctly with key actions, commands run, files changed, and possible next steps.\n\n{}", timeline);
+pub async fn send_chat_request(model: &str, system_prompt: &str, user_prompt: &str, api_key_opt: Option<String>) -> crate::Result<String> {
+    let api_key = if let Some(key) = api_key_opt {
+        key
+    } else {
+        std::env::var("OPENROUTER_API_KEY").map_err(|_| {
+            crate::error::TimeLoopError::Configuration("Missing OPENROUTER_API_KEY".to_string())
+        })?
+    };
 
-    let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
-        crate::error::TimeLoopError::Configuration("Missing OPENROUTER_API_KEY".to_string())
-    })?;
     let base = std::env::var("OPENROUTER_BASE_URL")
         .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
 
@@ -95,12 +96,11 @@ pub async fn summarize_session(session_id: &str, model: &str) -> crate::Result<S
         messages: vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: "You are a concise expert assistant for terminal session summaries."
-                    .to_string(),
+                content: system_prompt.to_string(),
             },
             ChatMessage {
                 role: "user".to_string(),
-                content: prompt,
+                content: user_prompt.to_string(),
             },
         ],
     };
@@ -131,4 +131,17 @@ pub async fn summarize_session(session_id: &str, model: &str) -> crate::Result<S
         .map(|c| c.message.content.clone())
         .unwrap_or_else(|| "No response".to_string());
     Ok(content)
+}
+
+pub async fn summarize_session(session_id: &str, model: &str) -> crate::Result<String> {
+    let storage = Storage::new()?;
+    let timeline = build_timeline(&storage, session_id, 200)?;
+    let prompt = format!("You are an expert assistant. Summarize the following terminal session succinctly with key actions, commands run, files changed, and possible next steps.\n\n{}", timeline);
+
+    send_chat_request(
+        model,
+        "You are a concise expert assistant for terminal session summaries.",
+        &prompt,
+        None
+    ).await
 }
