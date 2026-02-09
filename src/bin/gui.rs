@@ -9,33 +9,33 @@ struct TimeLoopGui {
     sessions: Vec<timeloop_terminal::session::Session>,
     selected: Option<String>,
     replay_summary: Option<timeloop_terminal::replay::ReplaySummary>,
-    
+
     // Replay controls
     playing: bool,
     speed: f32,
     position_ms: i64,
-    
+
     // UI state
     show_settings: bool,
     show_ai_panel: bool,
     show_import_dialog: bool,
     show_export_dialog: bool,
-    
+
     // Settings
     api_keys: std::collections::HashMap<String, String>,
     ai_model: String,
     theme: String,
     auto_refresh: bool,
-    
+
     // AI features
     ai_prompt: String,
     ai_response: String,
     ai_analyzing: bool,
-    
+
     // Import/Export
     import_path: String,
     export_path: String,
-    
+
     // Error handling
     error_message: Option<String>,
     success_message: Option<String>,
@@ -49,12 +49,12 @@ impl Default for TimeLoopGui {
                 sessions = list;
             }
         }
-        
+
         let mut api_keys = std::collections::HashMap::new();
         api_keys.insert("openai".to_string(), String::new());
         api_keys.insert("anthropic".to_string(), String::new());
         api_keys.insert("local".to_string(), String::new());
-        
+
         Self {
             sessions,
             selected: None,
@@ -87,12 +87,12 @@ impl eframe::App for TimeLoopGui {
         if self.error_message.is_some() || self.success_message.is_some() {
             ctx.request_repaint();
         }
-        
+
         // Auto-refresh sessions if enabled
         if self.auto_refresh {
             self.refresh_sessions();
         }
-        
+
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -114,7 +114,7 @@ impl eframe::App for TimeLoopGui {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
-                
+
                 ui.menu_button("Edit", |ui| {
                     if ui.button("Settings").clicked() {
                         self.show_settings = true;
@@ -125,18 +125,22 @@ impl eframe::App for TimeLoopGui {
                         ui.close_menu();
                     }
                 });
-                
+
                 ui.menu_button("View", |ui| {
                     if ui.button("AI Assistant").clicked() {
                         self.show_ai_panel = !self.show_ai_panel;
                         ui.close_menu();
                     }
                     if ui.button("Toggle Theme").clicked() {
-                        self.theme = if self.theme == "Dark" { "Light".to_string() } else { "Dark".to_string() };
+                        self.theme = if self.theme == "Dark" {
+                            "Light".to_string()
+                        } else {
+                            "Dark".to_string()
+                        };
                         ui.close_menu();
                     }
                 });
-                
+
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Session Analysis").clicked() {
                         self.analyze_session();
@@ -147,14 +151,14 @@ impl eframe::App for TimeLoopGui {
                         ui.close_menu();
                     }
                 });
-                
+
                 ui.menu_button("Help", |ui| {
                     if ui.button("About").clicked() {
                         self.show_about();
                         ui.close_menu();
                     }
                 });
-                
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(format!("Theme: {}", self.theme));
                     ui.checkbox(&mut self.auto_refresh, "Auto-refresh");
@@ -180,12 +184,13 @@ impl eframe::App for TimeLoopGui {
                 }
                 if ui.button("⏭️ Next").clicked() {
                     if let Some(ref rs) = self.replay_summary {
-                        self.position_ms = rs.duration.num_milliseconds().min(self.position_ms + 5000);
+                        self.position_ms =
+                            rs.duration.num_milliseconds().min(self.position_ms + 5000);
                     }
                 }
-                
+
                 ui.separator();
-                
+
                 if ui.button("🤖 AI Assistant").clicked() {
                     self.show_ai_panel = !self.show_ai_panel;
                 }
@@ -195,9 +200,9 @@ impl eframe::App for TimeLoopGui {
                 if ui.button("📊 Analysis").clicked() {
                     self.analyze_session();
                 }
-                
+
                 ui.separator();
-                
+
                 ui.label("Speed:");
                 ui.add(egui::Slider::new(&mut self.speed, 0.1..=5.0).text(""));
             });
@@ -207,16 +212,19 @@ impl eframe::App for TimeLoopGui {
         egui::SidePanel::left("sessions_panel").show(ctx, |ui| {
             ui.heading("Sessions");
             ui.separator();
-            
+
             // Session list
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let sessions = self.sessions.clone();
                 for s in &sessions {
                     let is_selected = self.selected.as_deref() == Some(&s.id);
-                    if ui.selectable_label(is_selected, format!("📁 {}", s.name)).clicked() {
+                    if ui
+                        .selectable_label(is_selected, format!("📁 {}", s.name))
+                        .clicked()
+                    {
                         self.select_session(&s.id);
                     }
-                    
+
                     // Context menu for each session
                     ui.allocate_ui_with_layout(
                         ui.available_size(),
@@ -225,13 +233,13 @@ impl eframe::App for TimeLoopGui {
                             if ui.small_button("⋯").clicked() {
                                 // TODO: Show context menu
                             }
-                        }
+                        },
                     );
                 }
             });
-            
+
             ui.separator();
-            
+
             // Session controls
             ui.horizontal(|ui| {
                 if ui.button("➕ New").clicked() {
@@ -251,21 +259,25 @@ impl eframe::App for TimeLoopGui {
             egui::SidePanel::right("ai_panel").show(ctx, |ui| {
                 ui.heading("🤖 AI Assistant");
                 ui.separator();
-                
+
                 ui.label("Model:");
                 egui::ComboBox::from_id_source("ai_model")
                     .selected_text(&self.ai_model)
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.ai_model, "gpt-4".to_string(), "GPT-4");
-                        ui.selectable_value(&mut self.ai_model, "gpt-3.5-turbo".to_string(), "GPT-3.5 Turbo");
+                        ui.selectable_value(
+                            &mut self.ai_model,
+                            "gpt-3.5-turbo".to_string(),
+                            "GPT-3.5 Turbo",
+                        );
                         ui.selectable_value(&mut self.ai_model, "claude-3".to_string(), "Claude 3");
                         ui.selectable_value(&mut self.ai_model, "local".to_string(), "Local Model");
                     });
-                
+
                 ui.add_space(8.0);
                 ui.label("Prompt:");
                 ui.text_edit_multiline(&mut self.ai_prompt);
-                
+
                 ui.horizontal(|ui| {
                     if ui.button("Send").clicked() {
                         self.send_ai_request();
@@ -275,7 +287,7 @@ impl eframe::App for TimeLoopGui {
                         self.ai_response.clear();
                     }
                 });
-                
+
                 ui.add_space(8.0);
                 ui.label("Response:");
                 ui.text_edit_multiline(&mut self.ai_response);
@@ -325,7 +337,7 @@ impl TimeLoopGui {
         self.selected = Some(session_id.to_string());
         self.position_ms = 0;
         self.playing = false;
-        
+
         // Load replay summary
         if let Ok(engine) = ReplayEngine::new(session_id) {
             if let Ok(rs) = engine.get_session_summary() {
@@ -398,7 +410,7 @@ impl TimeLoopGui {
 
         self.ai_analyzing = true;
         self.ai_response = "Analyzing your request...".to_string();
-        
+
         // TODO: Implement actual AI request
         // For now, simulate a response
         self.ai_response = format!("AI Response to: '{}'\n\nThis is a simulated response. In a real implementation, this would call the selected AI model with your prompt and the current session context.", self.ai_prompt);
@@ -435,9 +447,16 @@ impl TimeLoopGui {
             // Replay controls
             ui.group(|ui| {
                 ui.heading("🎮 Replay Controls");
-                
+
                 ui.horizontal(|ui| {
-                    if ui.button(if self.playing { "⏸️ Pause" } else { "▶️ Play" }).clicked() {
+                    if ui
+                        .button(if self.playing {
+                            "⏸️ Pause"
+                        } else {
+                            "▶️ Play"
+                        })
+                        .clicked()
+                    {
                         self.playing = !self.playing;
                     }
                     if ui.button("⏹️ Stop").clicked() {
@@ -448,27 +467,43 @@ impl TimeLoopGui {
                         self.position_ms = 0.max(self.position_ms - 5000);
                     }
                     if ui.button("⏭️ +5s").clicked() {
-                        self.position_ms = rs.duration.num_milliseconds().min(self.position_ms + 5000);
+                        self.position_ms =
+                            rs.duration.num_milliseconds().min(self.position_ms + 5000);
                     }
                 });
 
                 ui.add_space(4.0);
-                ui.label(format!("Position: {} ms / {} ms", self.position_ms, rs.duration.num_milliseconds()));
-                
+                ui.label(format!(
+                    "Position: {} ms / {} ms",
+                    self.position_ms,
+                    rs.duration.num_milliseconds()
+                ));
+
                 // Timeline scrubber
                 let fraction = if rs.duration.num_milliseconds() > 0 {
                     (self.position_ms as f64) / (rs.duration.num_milliseconds() as f64)
-                } else { 0.0 };
-                
-                let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), egui::Sense::click_and_drag());
-                ui.painter().rect_filled(rect, 4.0, egui::Color32::DARK_GRAY);
-                let filled = egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + rect.width() * fraction as f32, rect.max.y));
-                ui.painter().rect_filled(filled, 4.0, egui::Color32::LIGHT_GREEN);
-                
+                } else {
+                    0.0
+                };
+
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 20.0),
+                    egui::Sense::click_and_drag(),
+                );
+                ui.painter()
+                    .rect_filled(rect, 4.0, egui::Color32::DARK_GRAY);
+                let filled = egui::Rect::from_min_max(
+                    rect.min,
+                    egui::pos2(rect.min.x + rect.width() * fraction as f32, rect.max.y),
+                );
+                ui.painter()
+                    .rect_filled(filled, 4.0, egui::Color32::LIGHT_GREEN);
+
                 if response.dragged() {
                     if let Some(pos) = response.interact_pointer_pos() {
                         let new_fraction = (pos.x - rect.min.x) / rect.width();
-                        self.position_ms = ((new_fraction * rs.duration.num_milliseconds() as f32) as i64).max(0);
+                        self.position_ms =
+                            ((new_fraction * rs.duration.num_milliseconds() as f32) as i64).max(0);
                     }
                 }
             });
@@ -481,7 +516,6 @@ impl TimeLoopGui {
                 ui.label("Event timeline visualization would go here");
                 // TODO: Implement actual timeline visualization
             });
-
         } else {
             ui.label("No replay data available for this session.");
         }
@@ -491,10 +525,10 @@ impl TimeLoopGui {
         ui.vertical_centered(|ui| {
             ui.heading("Welcome to TimeLoop Terminal");
             ui.add_space(20.0);
-            
+
             ui.label("Select a session from the left panel to view details and replay controls.");
             ui.add_space(10.0);
-            
+
             ui.horizontal(|ui| {
                 if ui.button("Create New Session").clicked() {
                     self.create_new_session();
@@ -503,9 +537,9 @@ impl TimeLoopGui {
                     self.show_import_dialog = true;
                 }
             });
-            
+
             ui.add_space(20.0);
-            
+
             ui.group(|ui| {
                 ui.heading("Features");
                 ui.label("• Session recording and replay");
@@ -524,18 +558,18 @@ impl TimeLoopGui {
             .show(ctx, |ui| {
                 ui.heading("API Keys");
                 ui.separator();
-                
+
                 for (provider, key) in &mut self.api_keys {
                     ui.horizontal(|ui| {
                         ui.label(format!("{}:", provider));
                         ui.text_edit_singleline(key);
                     });
                 }
-                
+
                 ui.add_space(8.0);
                 ui.heading("Preferences");
                 ui.separator();
-                
+
                 ui.horizontal(|ui| {
                     ui.label("Theme:");
                     egui::ComboBox::from_id_source("theme")
@@ -545,9 +579,9 @@ impl TimeLoopGui {
                             ui.selectable_value(&mut self.theme, "Light".to_string(), "Light");
                         });
                 });
-                
+
                 ui.checkbox(&mut self.auto_refresh, "Auto-refresh sessions");
-                
+
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
@@ -569,14 +603,14 @@ impl TimeLoopGui {
             .show(ctx, |ui| {
                 ui.label("Import session from file:");
                 ui.text_edit_singleline(&mut self.import_path);
-                
+
                 ui.horizontal(|ui| {
                     if ui.button("Browse").clicked() {
                         // TODO: Implement file browser
                         self.import_path = "path/to/session.json".to_string();
                     }
                 });
-                
+
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Import").clicked() {
@@ -599,14 +633,14 @@ impl TimeLoopGui {
             .show(ctx, |ui| {
                 ui.label("Export session to file:");
                 ui.text_edit_singleline(&mut self.export_path);
-                
+
                 ui.horizontal(|ui| {
                     if ui.button("Browse").clicked() {
                         // TODO: Implement file browser
                         self.export_path = "path/to/export.json".to_string();
                     }
                 });
-                
+
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Export").clicked() {

@@ -1,11 +1,11 @@
+use crate::TimeLoopError;
+use bytemuck::{Pod, Zeroable};
+use glam::Mat4;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::path::Path;
+use std::sync::Arc;
 use wgpu::*;
 use winit::window::Window;
-use glam::Mat4;
-use bytemuck::{Pod, Zeroable};
-use crate::TimeLoopError;
 
 /// Core GPU renderer for text rendering with wgpu
 pub struct GpuRenderer {
@@ -25,13 +25,13 @@ pub struct GpuRenderer {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct GlyphInstance {
-    pub pos: [f32; 2],           // x, y position in pixels
-    pub size: [f32; 2],          // width, height
-    pub uv_rect: [f32; 4],       // u0, v0, u1, v1 texture coordinates
-    pub fg_color: u32,           // packed RGBA8 foreground color
-    pub flags: u16,              // bold/italic/underline/emoji flags
-    pub time_created: f32,       // timestamp for timeline effects
-    pub _padding: u16,           // padding for alignment
+    pub pos: [f32; 2],     // x, y position in pixels
+    pub size: [f32; 2],    // width, height
+    pub uv_rect: [f32; 4], // u0, v0, u1, v1 texture coordinates
+    pub fg_color: u32,     // packed RGBA8 foreground color
+    pub flags: u16,        // bold/italic/underline/emoji flags
+    pub time_created: f32, // timestamp for timeline effects
+    pub _padding: u16,     // padding for alignment
 }
 
 unsafe impl Pod for GlyphInstance {}
@@ -145,11 +145,13 @@ impl GpuRenderer {
     /// Create a new GPU renderer
     pub async fn new(window: Arc<Window>) -> Result<Self, TimeLoopError> {
         let size = window.inner_size();
-        
+
         // Initialize wgpu
         let instance = Instance::new(InstanceDescriptor::default());
-        let surface = instance.create_surface(window).map_err(|e| TimeLoopError::GpuError(e.to_string()))?;
-        
+        let surface = instance
+            .create_surface(window)
+            .map_err(|e| TimeLoopError::GpuError(e.to_string()))?;
+
         let adapter = instance
             .request_adapter(&RequestAdapterOptions {
                 power_preference: PowerPreference::default(),
@@ -157,8 +159,10 @@ impl GpuRenderer {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or_else(|| TimeLoopError::GpuError("Failed to find suitable GPU adapter".to_string()))?;
-        
+            .ok_or_else(|| {
+                TimeLoopError::GpuError("Failed to find suitable GPU adapter".to_string())
+            })?;
+
         let (device, queue) = adapter
             .request_device(
                 &DeviceDescriptor {
@@ -170,10 +174,10 @@ impl GpuRenderer {
             )
             .await
             .map_err(|e| TimeLoopError::GpuError(e.to_string()))?;
-        
+
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-        
+
         // Configure surface
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
@@ -182,7 +186,7 @@ impl GpuRenderer {
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
-        
+
         let surface_config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
@@ -194,21 +198,21 @@ impl GpuRenderer {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &surface_config);
-        
+
         // Create glyph atlas
         let mut glyph_atlas = GlyphAtlas::new(&device, 4096, 4096)?;
-        
+
         // Load default font (if available)
         if let Ok(font_path) = std::env::var("FONT_PATH") {
             let _ = glyph_atlas.load_font(Path::new(&font_path));
         }
-        
+
         // Create text shaper
         let text_shaper = TextShaper::new()?;
-        
+
         // Create render pipeline
         let render_pipeline = Self::create_render_pipeline(&device, surface_format)?;
-        
+
         // Create buffers
         let instance_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("Instance Buffer"),
@@ -216,17 +220,22 @@ impl GpuRenderer {
             usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        
+
         let uniform_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("Uniform Buffer"),
             size: std::mem::size_of::<Uniforms>() as u64,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        
+
         // Create bind group
-        let bind_group = Self::create_bind_group(&device, &glyph_atlas.texture, &glyph_atlas.sampler, &uniform_buffer)?;
-        
+        let bind_group = Self::create_bind_group(
+            &device,
+            &glyph_atlas.texture,
+            &glyph_atlas.sampler,
+            &uniform_buffer,
+        )?;
+
         Ok(Self {
             device,
             queue,
@@ -240,15 +249,18 @@ impl GpuRenderer {
             text_shaper,
         })
     }
-    
+
     /// Create the render pipeline for text rendering
-    fn create_render_pipeline(device: &Device, surface_format: TextureFormat) -> Result<RenderPipeline, TimeLoopError> {
+    fn create_render_pipeline(
+        device: &Device,
+        surface_format: TextureFormat,
+    ) -> Result<RenderPipeline, TimeLoopError> {
         // Load shaders
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Text Shader"),
             source: ShaderSource::Wgsl(include_str!("shaders/text.wgsl").into()),
         });
-        
+
         // Vertex buffer layouts
         let vertex_buffer_layouts = [
             // Unit quad vertices
@@ -299,13 +311,13 @@ impl GpuRenderer {
                 ],
             },
         ];
-        
+
         let render_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Text Render Pipeline Layout"),
             bind_group_layouts: &[&Self::create_bind_group_layout(device)?],
             push_constant_ranges: &[],
         });
-        
+
         let render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Text Render Pipeline"),
             layout: Some(&render_pipeline_layout),
@@ -342,10 +354,10 @@ impl GpuRenderer {
             },
             multiview: None,
         });
-        
+
         Ok(render_pipeline)
     }
-    
+
     /// Create bind group layout
     fn create_bind_group_layout(device: &Device) -> Result<BindGroupLayout, TimeLoopError> {
         let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -382,10 +394,10 @@ impl GpuRenderer {
                 },
             ],
         });
-        
+
         Ok(layout)
     }
-    
+
     /// Create bind group
     fn create_bind_group(
         device: &Device,
@@ -399,7 +411,9 @@ impl GpuRenderer {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: BindingResource::TextureView(&atlas_texture.create_view(&TextureViewDescriptor::default())),
+                    resource: BindingResource::TextureView(
+                        &atlas_texture.create_view(&TextureViewDescriptor::default()),
+                    ),
                 },
                 BindGroupEntry {
                     binding: 1,
@@ -411,22 +425,23 @@ impl GpuRenderer {
                 },
             ],
         });
-        
+
         Ok(bind_group)
     }
-    
+
     /// Render a frame with text
     pub fn render(&mut self, text: &str, time: f32) -> Result<(), TimeLoopError> {
         // Shape text
         let shaped_text = self.text_shaper.shape_text(text)?;
-        
+
         // Ensure glyphs are in atlas
         for glyph in &shaped_text.glyphs {
             if !self.glyph_atlas.contains(&glyph.font_key) {
-                self.glyph_atlas.add_glyph(&self.device, &self.queue, &glyph.font_key)?;
+                self.glyph_atlas
+                    .add_glyph(&self.device, &self.queue, &glyph.font_key)?;
             }
         }
-        
+
         // Build instance data
         let mut instances = Vec::new();
         for glyph in &shaped_text.glyphs {
@@ -442,16 +457,13 @@ impl GpuRenderer {
                 });
             }
         }
-        
+
         // Update instance buffer
         if !instances.is_empty() {
-            self.queue.write_buffer(
-                &self.instance_buffer,
-                0,
-                bytemuck::cast_slice(&instances),
-            );
+            self.queue
+                .write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
         }
-        
+
         // Update uniform buffer
         let uniforms = Uniforms {
             projection: Mat4::orthographic_rh_gl(
@@ -466,24 +478,21 @@ impl GpuRenderer {
             dpi_scale: 1.0,
             _padding: [0.0; 2],
         };
-        self.queue.write_buffer(
-            &self.uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[uniforms]),
-        );
-        
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
         // Render
-        let output = self.surface.get_current_texture().map_err(|e| TimeLoopError::GpuError(e.to_string()))?;
-        let view = output.texture.create_view(&TextureViewDescriptor::default());
-        
+        let output = self
+            .surface
+            .get_current_texture()
+            .map_err(|e| TimeLoopError::GpuError(e.to_string()))?;
+        let view = output
+            .texture
+            .create_view(&TextureViewDescriptor::default());
+
         // Unit quad vertices (hardcoded for now)
         let quad_vertices = [
-            -0.5, -0.5,
-             0.5, -0.5,
-             0.5,  0.5,
-            -0.5, -0.5,
-             0.5,  0.5,
-            -0.5,  0.5,
+            -0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, 0.5,
         ];
         let quad_buffer = self.device.create_buffer(&BufferDescriptor {
             label: Some("Quad Buffer"),
@@ -491,12 +500,15 @@ impl GpuRenderer {
             usage: BufferUsages::VERTEX,
             mapped_at_creation: false,
         });
-        self.queue.write_buffer(&quad_buffer, 0, bytemuck::cast_slice(&quad_vertices));
+        self.queue
+            .write_buffer(&quad_buffer, 0, bytemuck::cast_slice(&quad_vertices));
 
-        let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("Text Render Encoder"),
-        });
-        
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Text Render Encoder"),
+            });
+
         {
             let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("Text Render Pass"),
@@ -504,7 +516,12 @@ impl GpuRenderer {
                     view: &view,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Clear(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                        load: LoadOp::Clear(Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        }),
                         store: StoreOp::Store,
                     },
                 })],
@@ -512,23 +529,23 @@ impl GpuRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            
+
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.bind_group, &[]);
             render_pass.set_vertex_buffer(0, quad_buffer.slice(..));
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            
+
             if !instances.is_empty() {
                 render_pass.draw(0..6, 0..instances.len() as u32);
             }
         }
-        
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
-        
+
         Ok(())
     }
-    
+
     /// Resize the surface
     pub fn resize(&mut self, width: u32, height: u32) {
         self.surface_config.width = width;
@@ -554,7 +571,7 @@ impl GlyphAtlas {
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        
+
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("Atlas Sampler"),
             address_mode_u: AddressMode::ClampToEdge,
@@ -565,9 +582,9 @@ impl GlyphAtlas {
             mipmap_filter: FilterMode::Nearest,
             ..Default::default()
         });
-        
+
         let rasterizer = GlyphRasterizer::new()?;
-        
+
         Ok(Self {
             texture,
             sampler,
@@ -579,19 +596,24 @@ impl GlyphAtlas {
             rasterizer,
         })
     }
-    
+
     /// Check if a glyph exists in the atlas
     pub fn contains(&self, key: &GlyphKey) -> bool {
         self.slots.contains_key(key)
     }
-    
+
     /// Get atlas slot for a glyph
     pub fn get_slot(&self, key: &GlyphKey) -> Option<&AtlasSlot> {
         self.slots.get(key)
     }
-    
+
     /// Add a glyph to the atlas
-    pub fn add_glyph(&mut self, _device: &Device, queue: &Queue, key: &GlyphKey) -> Result<(), TimeLoopError> {
+    pub fn add_glyph(
+        &mut self,
+        _device: &Device,
+        queue: &Queue,
+        key: &GlyphKey,
+    ) -> Result<(), TimeLoopError> {
         // Rasterize the glyph using FreeType
         let rasterized = self.rasterizer.rasterize_glyph(
             &format!("{:x}", key.font_hash),
@@ -599,7 +621,7 @@ impl GlyphAtlas {
             key.size,
             key.scale,
         )?;
-        
+
         if let Some(rect) = self.packer.pack(rasterized.width, rasterized.height) {
             let slot = AtlasSlot {
                 x: rect.x,
@@ -612,13 +634,17 @@ impl GlyphAtlas {
                 v1: (rect.y + rect.height) as f32 / self.height as f32,
                 generation: self.generation,
             };
-            
+
             // Upload to GPU
             queue.write_texture(
                 ImageCopyTexture {
                     texture: &self.texture,
                     mip_level: 0,
-                    origin: Origin3d { x: rect.x, y: rect.y, z: 0 },
+                    origin: Origin3d {
+                        x: rect.x,
+                        y: rect.y,
+                        z: 0,
+                    },
                     aspect: TextureAspect::All,
                 },
                 &rasterized.pixels,
@@ -633,14 +659,14 @@ impl GlyphAtlas {
                     depth_or_array_layers: 1,
                 },
             );
-            
+
             self.slots.insert(key.clone(), slot);
             self.generation += 1;
         }
-        
+
         Ok(())
     }
-    
+
     /// Load a font into the rasterizer (placeholder)
     pub fn load_font(&mut self, _path: &std::path::Path) -> Result<u64, TimeLoopError> {
         // Placeholder implementation
@@ -657,14 +683,14 @@ impl SkylinePacker {
             height,
         }
     }
-    
+
     /// Pack a rectangle into the atlas
     pub fn pack(&mut self, width: u32, height: u32) -> Option<AtlasRect> {
         // Simple skyline packing algorithm
         for x in 0..=(self.width - width) {
             let mut max_height = 0;
             let mut can_fit = true;
-            
+
             for i in 0..width as usize {
                 let skyline_height = self.skyline[(x + i as u32) as usize];
                 max_height = max_height.max(skyline_height);
@@ -673,13 +699,13 @@ impl SkylinePacker {
                     break;
                 }
             }
-            
+
             if can_fit {
                 // Found a spot, update skyline
                 for i in 0..width as usize {
                     self.skyline[(x + i as u32) as usize] = max_height + height;
                 }
-                
+
                 return Some(AtlasRect {
                     x,
                     y: max_height,
@@ -688,7 +714,7 @@ impl SkylinePacker {
                 });
             }
         }
-        
+
         None
     }
 }
@@ -700,7 +726,7 @@ impl TextShaper {
         // In a real implementation, this would initialize HarfBuzz
         Ok(Self {})
     }
-    
+
     /// Shape text into glyph placements
     pub fn shape_text(&self, text: &str) -> Result<ShapedText, TimeLoopError> {
         // For now, create simple glyph placements
@@ -708,7 +734,7 @@ impl TextShaper {
         let mut glyphs = Vec::new();
         let mut x = 0.0;
         let y = 0.0;
-        
+
         for (i, ch) in text.chars().enumerate() {
             let glyph_key = GlyphKey {
                 font_hash: 0, // Placeholder
@@ -716,7 +742,7 @@ impl TextShaper {
                 size: 16,
                 scale: 1.0,
             };
-            
+
             glyphs.push(GlyphPlacement {
                 glyph_id: ch as u32,
                 x,
@@ -725,10 +751,10 @@ impl TextShaper {
                 cluster: i as u32,
                 font_key: glyph_key,
             });
-            
+
             x += 16.0;
         }
-        
+
         Ok(ShapedText {
             glyphs,
             width: x,
@@ -743,26 +769,36 @@ impl GlyphRasterizer {
         // Placeholder implementation
         Ok(Self {})
     }
-    
+
     /// Load a font face (placeholder)
-    pub fn load_font(&mut self, _path: &std::path::Path, _face_index: i32) -> Result<String, TimeLoopError> {
+    pub fn load_font(
+        &mut self,
+        _path: &std::path::Path,
+        _face_index: i32,
+    ) -> Result<String, TimeLoopError> {
         // Placeholder implementation
         Ok("default_font".to_string())
     }
-    
+
     /// Rasterize a glyph (placeholder)
-    pub fn rasterize_glyph(&mut self, _font_key: &str, _glyph_id: u32, size: u32, _scale: f32) -> Result<RasterizedGlyph, TimeLoopError> {
+    pub fn rasterize_glyph(
+        &mut self,
+        _font_key: &str,
+        _glyph_id: u32,
+        size: u32,
+        _scale: f32,
+    ) -> Result<RasterizedGlyph, TimeLoopError> {
         // Create a simple placeholder glyph (white square)
         let width = size;
         let height = size;
         let mut pixels = Vec::new();
-        
+
         for _y in 0..height {
             for _x in 0..width {
                 pixels.extend_from_slice(&[255, 255, 255, 255]); // White RGBA
             }
         }
-        
+
         Ok(RasterizedGlyph {
             width,
             height,

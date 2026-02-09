@@ -1,8 +1,8 @@
 use crate::storage::Storage;
 use chrono::{DateTime, Utc};
 use regex::Regex;
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
@@ -104,7 +104,8 @@ impl EventRecorder {
         // Enable redaction by default with sensible patterns
         let default_patterns = vec![
             // Generic assignment (e.g. password=...)
-            r"(?i)(password|pwd|secret|token|api_key|access_key|secret_key)\s*[:=]\s*[^\s\n]+".to_string(),
+            r"(?i)(password|pwd|secret|token|api_key|access_key|secret_key)\s*[:=]\s*[^\s\n]+"
+                .to_string(),
             // Bearer tokens
             r"(?i)bearer\s+[A-Za-z0-9\-\._]+".to_string(),
             // AWS Access Key ID
@@ -375,11 +376,14 @@ impl EventRecorder {
         for (key, value) in std::env::vars() {
             // Heuristic to identify secret keys
             let key_upper = key.to_uppercase();
-            if (key_upper.contains("KEY") ||
-                key_upper.contains("TOKEN") ||
-                key_upper.contains("SECRET") ||
-                key_upper.contains("PASSWORD")) &&
-                !value.is_empty() && value.len() > 3 { // Avoid redacting short common strings
+            if (key_upper.contains("KEY")
+                || key_upper.contains("TOKEN")
+                || key_upper.contains("SECRET")
+                || key_upper.contains("PASSWORD"))
+                && !value.is_empty()
+                && value.len() > 3
+            {
+                // Avoid redacting short common strings
                 self.redact_literals.push(value);
             }
         }
@@ -475,10 +479,9 @@ mod tests {
         let storage = crate::storage::Storage::with_path(db_path.to_str().unwrap()).unwrap();
         let mut recorder = EventRecorder::with_storage("hash-session", storage);
 
-        recorder.record_file_change(
-            file_path.to_str().unwrap(),
-            FileChangeType::Modified
-        ).unwrap();
+        recorder
+            .record_file_change(file_path.to_str().unwrap(), FileChangeType::Modified)
+            .unwrap();
 
         let events = recorder.get_events_for_session("hash-session").unwrap();
         assert_eq!(events.len(), 1);
@@ -486,7 +489,10 @@ mod tests {
         if let EventType::FileChange { content_hash, .. } = &events[0].event_type {
             assert!(content_hash.is_some());
             // SHA256 of "Hello world"
-            assert_eq!(content_hash.as_ref().unwrap(), "64ec88ca00b268e5ba1a35678a1b5316d212f4f366b2477232534a8aeca37f3c");
+            assert_eq!(
+                content_hash.as_ref().unwrap(),
+                "64ec88ca00b268e5ba1a35678a1b5316d212f4f366b2477232534a8aeca37f3c"
+            );
         } else {
             panic!("expected file change event");
         }
