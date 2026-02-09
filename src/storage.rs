@@ -5,6 +5,7 @@ use std::io::{BufRead, Read, Seek, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -21,7 +22,25 @@ use crate::branch::TimelineBranch;
 use crate::session::Session;
 use crate::Event;
 
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Debug)]
+enum WriteOp {
+    Append {
+        event: Event,
+        log_path: PathBuf,
+        format: PersistenceFormat,
+        key: Option<[u8; 32]>,
+    },
+    Snapshot {
+        inner: StorageInner,
+        path: PathBuf,
+        format: PersistenceFormat,
+        key: Option<[u8; 32]>,
+        salt: Option<Vec<u8>>,
+    },
+    Flush(Sender<()>),
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct StorageInner {
     events: HashMap<String, Vec<Event>>,       // session_id -> events
     sessions: HashMap<String, Session>,        // session_id -> session
@@ -104,6 +123,31 @@ pub struct Storage {
     background_handle: Option<thread::JoinHandle<()>>,
     // Pending writes counter for this instance (when not using global storage)
     pending_writes: Option<Arc<AtomicU32>>,
+    // Background writer
+    writer_tx: Option<Arc<SyncSender<WriteOp>>>,
+}
+
+impl Clone for Storage {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            persistence_path: self.persistence_path.clone(),
+            encryption_key: self.encryption_key,
+            encryption_salt: self.encryption_salt.clone(),
+            argon2_config: self.argon2_config.clone(),
+            persistence_format: self.persistence_format,
+            append_only: self.append_only,
+            events_log_path: self.events_log_path.clone(),
+            max_log_size_bytes: self.max_log_size_bytes,
+            max_events: self.max_events,
+            retention_count: self.retention_count,
+            compaction_interval_secs: self.compaction_interval_secs,
+            background_running: self.background_running.clone(),
+            background_handle: None, // Does not clone handle
+            pending_writes: self.pending_writes.clone(),
+            writer_tx: self.writer_tx.clone(),
+        }
+    }
 }
 
 impl Storage {
@@ -192,6 +236,7 @@ impl Storage {
             background_running: None,
             background_handle: None,
             pending_writes: None,
+            writer_tx: Self::spawn_writer(),
         };
         if append {
             // compute events log path for default global persistence file
@@ -248,6 +293,7 @@ impl Storage {
             background_running: None,
             background_handle: None,
             pending_writes: Some(pending_writes),
+            writer_tx: Self::spawn_writer(),
         };
 
         // If the file exists, load it into the per-instance inner store
@@ -385,7 +431,7 @@ impl Storage {
 
         let gp = global_compaction_policy();
         let pending_writes = Arc::new(AtomicU32::new(0));
-        Ok(Self { inner: Some(inner), persistence_path: Some(pb), encryption_key, encryption_salt, argon2_config: Some(params.clone()), persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None, pending_writes: Some(pending_writes) })
+        Ok(Self { inner: Some(inner), persistence_path: Some(pb), encryption_key, encryption_salt, argon2_config: Some(params.clone()), persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None, pending_writes: Some(pending_writes), writer_tx: Self::spawn_writer() })
     }
 
     pub fn get_db_path() -> crate::Result<std::path::PathBuf> {
@@ -429,6 +475,63 @@ impl Storage {
             let session_events = guard.events.entry(event.session_id.clone()).or_default();
             session_events.push(event.clone());
         })?;
+
+        if let Some(tx) = &self.writer_tx {
+            let op = if self.append_only {
+                if let Some(log_path) = &self.events_log_path {
+                    Some(WriteOp::Append {
+                        event: event.clone(),
+                        log_path: log_path.clone(),
+                        format: self.persistence_format,
+                        key: self.encryption_key,
+                    })
+                } else {
+                    None
+                }
+            } else if let Some(path) = &self.persistence_path {
+                let inner_data = if let Some(inner) = &self.inner {
+                    inner
+                        .read()
+                        .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?
+                        .clone()
+                } else {
+                    GLOBAL_STORAGE
+                        .read()
+                        .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?
+                        .clone()
+                };
+                Some(WriteOp::Snapshot {
+                    inner: inner_data,
+                    path: path.clone(),
+                    format: self.persistence_format,
+                    key: self.encryption_key,
+                    salt: self.encryption_salt.clone(),
+                })
+            } else if self.inner.is_none() {
+                let inner_data = GLOBAL_STORAGE
+                    .read()
+                    .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?
+                    .clone();
+                let path = Self::persistence_file();
+                Some(WriteOp::Snapshot {
+                    inner: inner_data,
+                    path,
+                    format: self.persistence_format,
+                    key: None,
+                    salt: None,
+                })
+            } else {
+                None
+            };
+
+            if let Some(op) = op {
+                if tx.try_send(op).is_ok() {
+                    return Ok(());
+                }
+                // Fallback to sync if send failed (queue full or disconnected)
+            }
+        }
+
         // If append-only logging is enabled, append event to the log; otherwise
         // persist the full state as before.
         if self.append_only {
@@ -437,6 +540,143 @@ impl Storage {
             let _ = Self::save_to_path(path, self);
         } else if self.inner.is_none() {
             let _ = Self::save_to_disk();
+        }
+        Ok(())
+    }
+
+    fn spawn_writer() -> Option<Arc<SyncSender<WriteOp>>> {
+        let (tx, rx) = sync_channel(1000);
+        std::thread::Builder::new()
+            .name("timeloop-writer".to_string())
+            .spawn(move || {
+                Self::writer_loop(rx);
+            })
+            .ok();
+        Some(Arc::new(tx))
+    }
+
+    fn writer_loop(rx: Receiver<WriteOp>) {
+        while let Ok(op) = rx.recv() {
+            match op {
+                WriteOp::Append { event, log_path, format, key } => {
+                    let _ = Self::append_event_to_log_impl(&event, &log_path, format, key.as_ref());
+                }
+                WriteOp::Snapshot { inner, path, format, key, salt } => {
+                     let _ = Self::save_snapshot_impl(&inner, &path, format, key.as_ref(), salt.as_ref());
+                }
+                WriteOp::Flush(tx) => {
+                    let _ = tx.send(());
+                }
+            }
+        }
+    }
+
+    fn save_snapshot_impl(
+        inner: &StorageInner,
+        path: &PathBuf,
+        format: PersistenceFormat,
+        key: Option<&[u8; 32]>,
+        salt: Option<&Vec<u8>>,
+    ) -> crate::Result<()> {
+        let mut data_bytes = match format {
+            PersistenceFormat::Json => serde_json::to_vec_pretty(inner)?,
+            PersistenceFormat::Cbor => serde_cbor::to_vec(inner)?,
+        };
+
+        if let Some(key) = key {
+            let salt = salt.ok_or_else(|| {
+                crate::error::TimeLoopError::Configuration(
+                    "Missing salt for encrypted storage".to_string(),
+                )
+            })?;
+            let (nonce, ciphertext) = Self::encrypt_bytes(key, data_bytes.as_slice())?;
+            match format {
+                PersistenceFormat::Json => {
+                    let wrapper = EncryptedFile {
+                        salt: general_purpose::STANDARD.encode(salt),
+                        nonce: general_purpose::STANDARD.encode(&nonce),
+                        ciphertext: general_purpose::STANDARD.encode(&ciphertext),
+                    };
+                    let wrapper_json = serde_json::to_string_pretty(&wrapper)?;
+                    Self::atomic_write(path, wrapper_json.as_bytes())?;
+                }
+                PersistenceFormat::Cbor => {
+                    let wrapper_cbor = EncryptedFileCbor {
+                        salt: salt.clone(),
+                        nonce,
+                        ciphertext,
+                    };
+                    let wrapper_bytes = serde_cbor::to_vec(&wrapper_cbor)?;
+                    Self::atomic_write(path, &wrapper_bytes)?;
+                }
+            }
+            data_bytes.zeroize();
+        } else {
+            Self::atomic_write(path, data_bytes.as_slice())?;
+            data_bytes.zeroize();
+        }
+        Ok(())
+    }
+
+    fn append_event_to_log_impl(
+        event: &Event,
+        path: &PathBuf,
+        format: PersistenceFormat,
+        key: Option<&[u8; 32]>,
+    ) -> crate::Result<()> {
+        if format == PersistenceFormat::Json {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            if let Some(key) = key {
+                let plain = serde_json::to_vec(event)?;
+                let (nonce, ciphertext) = Self::encrypt_bytes(key, &plain)?;
+                let wrapper = EncryptedEventJson {
+                    nonce: general_purpose::STANDARD.encode(&nonce),
+                    ciphertext: general_purpose::STANDARD.encode(&ciphertext),
+                };
+                let line = serde_json::to_string(&wrapper)?;
+                file.write_all(line.as_bytes())
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                file.write_all(b"\n")
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            } else {
+                let line = serde_json::to_string(event)?;
+                file.write_all(line.as_bytes())
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                file.write_all(b"\n")
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            }
+            file.flush()
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        } else {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            if let Some(key) = key {
+                let plain = serde_cbor::to_vec(event)?;
+                let (nonce, ciphertext) = Self::encrypt_bytes(key, &plain)?;
+                let wrapper = EncryptedEventCbor { nonce, ciphertext };
+                let buf = serde_cbor::to_vec(&wrapper)?;
+                let len = (buf.len() as u32).to_le_bytes();
+                file.write_all(&len)
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                file.write_all(&buf)
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            } else {
+                let buf = serde_cbor::to_vec(event)?;
+                let len = (buf.len() as u32).to_le_bytes();
+                file.write_all(&len)
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                file.write_all(&buf)
+                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            }
+            file.flush()
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         }
         Ok(())
     }
@@ -677,6 +917,49 @@ impl Storage {
     }
 
     pub fn flush(&self) -> crate::Result<()> {
+        if let Some(writer) = &self.writer_tx {
+            if let Some(path) = &self.persistence_path {
+                let inner_data = if let Some(inner) = &self.inner {
+                    inner
+                        .read()
+                        .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?
+                        .clone()
+                } else {
+                    GLOBAL_STORAGE
+                        .read()
+                        .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?
+                        .clone()
+                };
+                let _ = writer.send(WriteOp::Snapshot {
+                    inner: inner_data,
+                    path: path.clone(),
+                    format: self.persistence_format,
+                    key: self.encryption_key,
+                    salt: self.encryption_salt.clone(),
+                });
+            } else if self.inner.is_none() {
+                let inner_data = GLOBAL_STORAGE
+                    .read()
+                    .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?
+                    .clone();
+                let path = Self::persistence_file();
+                let _ = writer.send(WriteOp::Snapshot {
+                    inner: inner_data,
+                    path,
+                    format: self.persistence_format,
+                    key: None,
+                    salt: None,
+                });
+            }
+
+            let (tx, rx) = channel();
+            if writer.send(WriteOp::Flush(tx)).is_ok() {
+                if rx.recv().is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+
         if let Some(path) = &self.persistence_path {
             Self::save_to_path(path, self)
         } else {
@@ -1078,49 +1361,13 @@ impl Storage {
                 .clone()
         };
 
-        // Serialize according to the chosen persistence format
-        let mut data_bytes = match storage.persistence_format {
-            PersistenceFormat::Json => serde_json::to_vec_pretty(&data_inner)?,
-            PersistenceFormat::Cbor => serde_cbor::to_vec(&data_inner)?,
-        };
-
-        // If encryption is enabled on this storage, encrypt the blob and write a wrapper
-        if let Some(key) = &storage.encryption_key {
-            // reuse salt if present
-            let salt = storage.encryption_salt.as_ref().ok_or_else(|| {
-                crate::error::TimeLoopError::Configuration(
-                    "Missing salt for encrypted storage".to_string(),
-                )
-            })?;
-            let (nonce, ciphertext) = Self::encrypt_bytes(key, data_bytes.as_slice())?;
-            match storage.persistence_format {
-                PersistenceFormat::Json => {
-                    let wrapper = EncryptedFile {
-                        salt: general_purpose::STANDARD.encode(salt),
-                        nonce: general_purpose::STANDARD.encode(&nonce),
-                        ciphertext: general_purpose::STANDARD.encode(&ciphertext),
-                    };
-                    let wrapper_json = serde_json::to_string_pretty(&wrapper)?;
-                    Self::atomic_write(path, wrapper_json.as_bytes())?;
-                }
-                PersistenceFormat::Cbor => {
-                    let wrapper_cbor = EncryptedFileCbor {
-                        salt: salt.clone(),
-                        nonce,
-                        ciphertext,
-                    };
-                    let wrapper_bytes = serde_cbor::to_vec(&wrapper_cbor)?;
-                    Self::atomic_write(path, &wrapper_bytes)?;
-                }
-            }
-            // zeroize plaintext
-            data_bytes.zeroize();
-        } else {
-            // Unencrypted path: write according to format directly
-            Self::atomic_write(path, data_bytes.as_slice())?;
-            data_bytes.zeroize();
-        }
-        Ok(())
+        Self::save_snapshot_impl(
+            &data_inner,
+            path,
+            storage.persistence_format,
+            storage.encryption_key.as_ref(),
+            storage.encryption_salt.as_ref(),
+        )
     }
 
     // Encrypt given plaintext with the given 32-byte key using XChaCha20-Poly1305.
@@ -1343,62 +1590,12 @@ impl Storage {
             None => return Ok(()),
         };
 
-        if self.persistence_format == PersistenceFormat::Json {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-            if let Some(key) = &self.encryption_key {
-                // encrypt event JSON bytes
-                let plain = serde_json::to_vec(event)?;
-                let (nonce, ciphertext) = Self::encrypt_bytes(key, &plain)?;
-                let wrapper = EncryptedEventJson {
-                    nonce: general_purpose::STANDARD.encode(&nonce),
-                    ciphertext: general_purpose::STANDARD.encode(&ciphertext),
-                };
-                let line = serde_json::to_string(&wrapper)?;
-                file.write_all(line.as_bytes())
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                file.write_all(b"\n")
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-            } else {
-                let line = serde_json::to_string(event)?;
-                file.write_all(line.as_bytes())
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                file.write_all(b"\n")
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-            }
-            file.flush()
-                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-        } else {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-            if let Some(key) = &self.encryption_key {
-                let plain = serde_cbor::to_vec(event)?;
-                let (nonce, ciphertext) = Self::encrypt_bytes(key, &plain)?;
-                let wrapper = EncryptedEventCbor { nonce, ciphertext };
-                let buf = serde_cbor::to_vec(&wrapper)?;
-                let len = (buf.len() as u32).to_le_bytes();
-                file.write_all(&len)
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                file.write_all(&buf)
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-            } else {
-                let buf = serde_cbor::to_vec(event)?;
-                let len = (buf.len() as u32).to_le_bytes();
-                file.write_all(&len)
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                file.write_all(&buf)
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-            }
-            file.flush()
-                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-        }
-        Ok(())
+        Self::append_event_to_log_impl(
+            event,
+            &path,
+            self.persistence_format,
+            self.encryption_key.as_ref(),
+        )
     }
 }
 
@@ -1428,11 +1625,10 @@ impl Default for CompactionPolicy {
 }
 
 fn global_persistence_format() -> PersistenceFormat {
-    GLOBAL_PERSISTENCE_FORMAT
+    *GLOBAL_PERSISTENCE_FORMAT
         .get_or_init(|| RwLock::new(PersistenceFormat::Json))
         .read()
         .unwrap()
-        .clone()
 }
 
 fn global_append_only() -> bool {
@@ -1443,11 +1639,10 @@ fn global_append_only() -> bool {
 }
 
 fn global_compaction_policy() -> CompactionPolicy {
-    GLOBAL_COMPACTION_POLICY
+    *GLOBAL_COMPACTION_POLICY
         .get_or_init(|| RwLock::new(CompactionPolicy::default()))
         .read()
         .unwrap()
-        .clone()
 }
 
 #[allow(dead_code)]
@@ -2021,4 +2216,5 @@ mod tests {
         // When storage goes out of scope, it should zeroize inner
         drop(storage);
     }
+
 }

@@ -384,7 +384,7 @@ impl EventRecorder {
             }
         }
         // Sort by length descending to replace longest matches first
-        self.redact_literals.sort_by(|a, b| b.len().cmp(&a.len()));
+        self.redact_literals.sort_by_key(|b| std::cmp::Reverse(b.len()));
     }
 
     fn apply_redaction(&self, text: &str) -> String {
