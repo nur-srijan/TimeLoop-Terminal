@@ -1,4 +1,4 @@
-use sha2::{Sha256, Digest};
+use sha2::Sha256;
 use std::io::Write;
 
 fn main() {
