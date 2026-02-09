@@ -1,16 +1,16 @@
+use std::sync::Arc;
 use timeloop_terminal::GpuRenderer;
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::Window,
 };
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
     env_logger::init();
-    
+
     // Create window
     let event_loop = EventLoop::new()?;
     let window_attributes = Window::default_attributes()
@@ -19,12 +19,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let window = Arc::new(event_loop.create_window(window_attributes)?);
     let mut renderer = GpuRenderer::new(window.clone()).await?;
-    
+
     // Demo text
     let demo_text = "Hello, TimeLoop Terminal!\nThis is GPU-rendered text.\nIt supports multiple lines and should be smooth.";
-    
+
     let mut time = 0.0;
-    
+
     // Run event loop
     event_loop.run(move |event, elwt| {
         match event {
@@ -53,6 +53,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         }
     })?;
-    
+
     Ok(())
 }

@@ -26,9 +26,13 @@ struct Cli {
     #[arg(long)]
     persistence_format: Option<String>,
 
-    /// Enable append-only event logging to reduce memory usage
-    #[arg(long, default_value_t = false)]
+    /// Enable append-only event logging (deprecated, enabled by default)
+    #[arg(long)]
     append_events: bool,
+
+    /// Disable append-only event logging (force full rewrite persistence)
+    #[arg(long)]
+    disable_append_events: bool,
 
     /// Argon2 memory in KiB (default: 65536)
     #[arg(long)]
@@ -191,7 +195,10 @@ async fn main() -> Result<(), TimeLoopError> {
             }
         }
     }
-    timeloop_terminal::storage::Storage::set_global_append_only(cli.append_events);
+    // Append-only is now enabled by default. The --append-events flag is kept for backward
+    // compatibility (it's a no-op as the feature is on). To disable, use --disable-append-events.
+    let append_only = !cli.disable_append_events;
+    timeloop_terminal::storage::Storage::set_global_append_only(append_only);
 
     // Wire Argon2 CLI params into global config if provided
     if cli.argon2_memory_kib.is_some()

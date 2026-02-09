@@ -1,7 +1,7 @@
 #![cfg(feature = "gui")]
 
 use eframe::egui;
-use timeloop_terminal::{SessionManager, ReplayEngine, GpuRenderer};
+use timeloop_terminal::{GpuRenderer, ReplayEngine, SessionManager};
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -46,7 +46,7 @@ impl eframe::App for TimeLoopGpuGui {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Update time for animations
         self.time += ctx.input(|i| i.unstable_dt);
-        
+
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.heading("TimeLoop Terminal (GPU Rendering Demo)");
         });
@@ -55,7 +55,13 @@ impl eframe::App for TimeLoopGpuGui {
             ui.label("Sessions:");
             ui.separator();
             for s in &self.sessions {
-                if ui.selectable_label(self.selected.as_deref() == Some(&s.id), format!("{} - {}", s.id, s.name)).clicked() {
+                if ui
+                    .selectable_label(
+                        self.selected.as_deref() == Some(&s.id),
+                        format!("{} - {}", s.id, s.name),
+                    )
+                    .clicked()
+                {
                     self.selected = Some(s.id.clone());
                     // load summary
                     if let Ok(sm) = SessionManager::new() {
@@ -88,13 +94,13 @@ impl eframe::App for TimeLoopGpuGui {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.label("GPU Text Rendering Demo");
             ui.separator();
-            
+
             // Demo text input
             ui.label("Demo Text:");
             ui.text_edit_multiline(&mut self.demo_text);
-            
+
             ui.add_space(8.0);
-            
+
             // GPU renderer status
             if let Some(_renderer) = &self.gpu_renderer {
                 ui.label("✅ GPU Renderer: Active");
@@ -105,9 +111,9 @@ impl eframe::App for TimeLoopGpuGui {
                     ui.label("GPU renderer initialization would happen here");
                 }
             }
-            
+
             ui.add_space(8.0);
-            
+
             if let Some(ref id) = self.selected {
                 ui.label(format!("Selected Session: {}", id));
                 if let Some(ref rs) = self.replay_summary {
@@ -118,7 +124,10 @@ impl eframe::App for TimeLoopGpuGui {
                     ui.label(format!("Duration: {}s", rs.duration.num_seconds()));
 
                     ui.horizontal(|ui| {
-                        if ui.button(if self.playing { "Pause" } else { "Play" }).clicked() {
+                        if ui
+                            .button(if self.playing { "Pause" } else { "Play" })
+                            .clicked()
+                        {
                             self.playing = !self.playing;
                         }
                         if ui.button("Step +1s").clicked() {
@@ -133,11 +142,21 @@ impl eframe::App for TimeLoopGpuGui {
                     // Simple timeline visualization
                     let fraction = if rs.duration.num_milliseconds() > 0 {
                         (self.position_ms as f64) / (rs.duration.num_milliseconds() as f64)
-                    } else { 0.0 };
-                    let (rect, _response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 4.0, egui::Color32::DARK_GRAY);
-                    let filled = egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + rect.width() * fraction as f32, rect.max.y));
-                    ui.painter().rect_filled(filled, 4.0, egui::Color32::LIGHT_GREEN);
+                    } else {
+                        0.0
+                    };
+                    let (rect, _response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 30.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter()
+                        .rect_filled(rect, 4.0, egui::Color32::DARK_GRAY);
+                    let filled = egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.min.x + rect.width() * fraction as f32, rect.max.y),
+                    );
+                    ui.painter()
+                        .rect_filled(filled, 4.0, egui::Color32::LIGHT_GREEN);
 
                     // Playback advancement
                     if self.playing {
@@ -151,14 +170,13 @@ impl eframe::App for TimeLoopGpuGui {
                         }
                         ctx.request_repaint();
                     }
-
                 } else {
                     ui.label("No replay summary available for this session.");
                 }
             } else {
                 ui.label("No session selected.");
             }
-            
+
             ui.add_space(16.0);
             ui.label("GPU Text Rendering Features:");
             ui.label("• HarfBuzz text shaping for complex scripts");
@@ -168,7 +186,7 @@ impl eframe::App for TimeLoopGpuGui {
             ui.label("• SDF-based anti-aliasing (planned)");
             ui.label("• Multi-font support (planned)");
         });
-        
+
         // Request repaint for animations
         ctx.request_repaint();
     }

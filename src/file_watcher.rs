@@ -1,8 +1,8 @@
-use std::path::{PathBuf, Path};
+use glob::{MatchOptions, Pattern};
 use notify::{recommended_watcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use glob::{Pattern, MatchOptions};
 
 use crate::FileChangeType;
 use std::sync::Arc;
@@ -35,7 +35,10 @@ fn parse_ignore_pattern(pattern: &str) -> IgnorePattern {
         match Pattern::new(pattern) {
             Ok(p) => IgnorePattern::Glob(p),
             Err(e) => {
-                eprintln!("Warning: Invalid glob pattern '{}': {}. Falling back to exact match.", pattern, e);
+                eprintln!(
+                    "Warning: Invalid glob pattern '{}': {}. Falling back to exact match.",
+                    pattern, e
+                );
                 IgnorePattern::Exact(pattern.to_string())
             }
         }
@@ -55,8 +58,8 @@ fn should_ignore_path(path: &Path, ignore_patterns: &[IgnorePattern]) -> bool {
     };
 
     let match_options = MatchOptions {
-        case_sensitive: true, // Default
-        require_literal_separator: true, // Do not allow * to match /
+        case_sensitive: true,               // Default
+        require_literal_separator: true,    // Do not allow * to match /
         require_literal_leading_dot: false, // Default
     };
 
@@ -64,7 +67,7 @@ fn should_ignore_path(path: &Path, ignore_patterns: &[IgnorePattern]) -> bool {
         match pattern {
             IgnorePattern::Glob(p) => p.matches_with(&normalized_path, match_options),
             IgnorePattern::Exact(p) => {
-                 // Exact path component matching
+                // Exact path component matching
                 // Check if the pattern matches a path component or the end of the path
                 // This prevents "target" from matching "src/targets/file.rs"
                 for component in path.components() {
@@ -148,11 +151,11 @@ impl FileWatcher {
                     Ok(Ok(event)) => {
                         // Filter out ignored files
                         let notify::Event { paths, .. } = &event;
-                        
-                        let should_process = paths.iter().all(|path| {
-                            !should_ignore_path(path, &ignore_patterns)
-                        });
-                        
+
+                        let should_process = paths
+                            .iter()
+                            .all(|path| !should_ignore_path(path, &ignore_patterns));
+
                         if should_process {
                             if let Err(e) = tx.blocking_send(event) {
                                 eprintln!("Failed to send file event: {}", e);
@@ -204,7 +207,9 @@ impl FileWatcher {
                     // For rename events, if not 2 paths, we can't do much or treat as modify/create
                     // Fallback if we only got 1 path for some reason (rare for Rename)
                     eprintln!("Warning: Received rename event with {} paths, expected 2. Fallback to rename with empty old_path.", event.paths.len());
-                    FileChangeType::Renamed { old_path: String::new() }
+                    FileChangeType::Renamed {
+                        old_path: String::new(),
+                    }
                 }
                 notify::EventKind::Modify(_) => FileChangeType::Modified,
                 _ => continue, // Skip other event types

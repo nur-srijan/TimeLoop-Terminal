@@ -53,7 +53,8 @@ impl Drop for StorageInner {
 // Atomic counter for tracking pending write operations to reduce lock contention
 static PENDING_WRITES: AtomicU32 = AtomicU32::new(0);
 
-static GLOBAL_STORAGE: Lazy<RwLock<StorageInner>> = Lazy::new(|| RwLock::new(StorageInner::default()));
+static GLOBAL_STORAGE: Lazy<RwLock<StorageInner>> =
+    Lazy::new(|| RwLock::new(StorageInner::default()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Argon2Config {
@@ -153,7 +154,6 @@ impl Storage {
             PENDING_WRITES.fetch_sub(1, Ordering::Relaxed);
         }
     }
-
 
     /// Replace the compaction policy for this instance
     pub fn set_compaction_policy(&mut self, p: CompactionPolicy) {
@@ -385,7 +385,23 @@ impl Storage {
 
         let gp = global_compaction_policy();
         let pending_writes = Arc::new(AtomicU32::new(0));
-        Ok(Self { inner: Some(inner), persistence_path: Some(pb), encryption_key, encryption_salt, argon2_config: Some(params.clone()), persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None, pending_writes: Some(pending_writes) })
+        Ok(Self {
+            inner: Some(inner),
+            persistence_path: Some(pb),
+            encryption_key,
+            encryption_salt,
+            argon2_config: Some(params.clone()),
+            persistence_format: format,
+            append_only: false,
+            events_log_path: None,
+            max_log_size_bytes: gp.max_log_size_bytes,
+            max_events: gp.max_events,
+            retention_count: gp.retention_count,
+            compaction_interval_secs: gp.compaction_interval_secs,
+            background_running: None,
+            background_handle: None,
+            pending_writes: Some(pending_writes),
+        })
     }
 
     pub fn get_db_path() -> crate::Result<std::path::PathBuf> {
@@ -398,10 +414,14 @@ impl Storage {
         F: FnOnce(&StorageInner) -> R,
     {
         if let Some(inner) = &self.inner {
-            let guard = inner.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+            let guard = inner
+                .read()
+                .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
             Ok(f(&guard))
         } else {
-            let guard = GLOBAL_STORAGE.read().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+            let guard = GLOBAL_STORAGE
+                .read()
+                .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
             Ok(f(&guard))
         }
     }
@@ -413,10 +433,14 @@ impl Storage {
     {
         self.increment_pending_writes();
         let result = if let Some(inner) = &self.inner {
-            let mut guard = inner.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+            let mut guard = inner
+                .write()
+                .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
             Ok(f(&mut guard))
         } else {
-            let mut guard = GLOBAL_STORAGE.write().map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
+            let mut guard = GLOBAL_STORAGE
+                .write()
+                .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
             Ok(f(&mut guard))
         };
         self.decrement_pending_writes();
@@ -464,11 +488,7 @@ impl Storage {
         Ok(events.last().cloned())
     }
 
-    pub fn get_last_n_events(
-        &self,
-        session_id: &str,
-        n: usize,
-    ) -> crate::Result<Vec<Event>> {
+    pub fn get_last_n_events(&self, session_id: &str, n: usize) -> crate::Result<Vec<Event>> {
         self.with_read(|guard| {
             guard
                 .events
@@ -608,65 +628,97 @@ impl Storage {
             let wrapper_json = serde_json::to_string_pretty(&wrapper)?;
 
             // Write to file
-            let mut file = fs::File::create(path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-            file.write_all(wrapper_json.as_bytes()).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            let mut file = fs::File::create(path)
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            file.write_all(wrapper_json.as_bytes())
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
 
             // zeroize plaintext
             data_bytes.zeroize();
         } else {
             // Plaintext export
-            let mut file = fs::File::create(path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-            file.write_all(&data_bytes).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            let mut file = fs::File::create(path)
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            file.write_all(&data_bytes)
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             data_bytes.zeroize();
         }
         Ok(())
     }
 
     pub fn import_session_from_file(&self, path: &str) -> crate::Result<String> {
-        let file_bytes = fs::read(path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        let file_bytes =
+            fs::read(path).map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
 
         // Attempt to parse as EncryptedFile JSON first
         let data = if let Ok(json_str) = String::from_utf8(file_bytes.clone()) {
-             if let Ok(wrapper) = serde_json::from_str::<EncryptedFile>(&json_str) {
-                 // It's an encrypted export
-                 if let Some(key) = &self.encryption_key {
-                     // Verify salts match if we are to use the current key
-                     // Note: Since we are using the current derived key, we can only decrypt if the export was made
-                     // with the same salt (same storage instance). If salts differ, we can't decrypt with current key.
-                     let file_salt = general_purpose::STANDARD.decode(&wrapper.salt)
-                        .map_err(|e| crate::error::TimeLoopError::Storage(format!("Invalid salt in export: {}", e)))?;
+            if let Ok(wrapper) = serde_json::from_str::<EncryptedFile>(&json_str) {
+                // It's an encrypted export
+                if let Some(key) = &self.encryption_key {
+                    // Verify salts match if we are to use the current key
+                    // Note: Since we are using the current derived key, we can only decrypt if the export was made
+                    // with the same salt (same storage instance). If salts differ, we can't decrypt with current key.
+                    let file_salt =
+                        general_purpose::STANDARD
+                            .decode(&wrapper.salt)
+                            .map_err(|e| {
+                                crate::error::TimeLoopError::Storage(format!(
+                                    "Invalid salt in export: {}",
+                                    e
+                                ))
+                            })?;
 
-                     if let Some(current_salt) = &self.encryption_salt {
-                         if &file_salt != current_salt {
-                             return Err(crate::error::TimeLoopError::Storage(
+                    if let Some(current_salt) = &self.encryption_salt {
+                        if &file_salt != current_salt {
+                            return Err(crate::error::TimeLoopError::Storage(
                                  "Cannot import encrypted session: salt mismatch. Import is only supported on the same storage instance.".to_string()
                              ));
-                         }
-                     }
+                        }
+                    }
 
-                     let nonce = general_purpose::STANDARD.decode(&wrapper.nonce)
-                        .map_err(|e| crate::error::TimeLoopError::Storage(format!("Invalid nonce in export: {}", e)))?;
-                     let ciphertext = general_purpose::STANDARD.decode(&wrapper.ciphertext)
-                        .map_err(|e| crate::error::TimeLoopError::Storage(format!("Invalid ciphertext in export: {}", e)))?;
+                    let nonce = general_purpose::STANDARD
+                        .decode(&wrapper.nonce)
+                        .map_err(|e| {
+                            crate::error::TimeLoopError::Storage(format!(
+                                "Invalid nonce in export: {}",
+                                e
+                            ))
+                        })?;
+                    let ciphertext = general_purpose::STANDARD
+                        .decode(&wrapper.ciphertext)
+                        .map_err(|e| {
+                            crate::error::TimeLoopError::Storage(format!(
+                                "Invalid ciphertext in export: {}",
+                                e
+                            ))
+                        })?;
 
-                     match Self::try_decrypt(key, &nonce, &ciphertext) {
-                         Ok(plain) => plain,
-                         Err(_) => return Err(crate::error::TimeLoopError::Storage("Decryption failed".to_string())),
-                     }
-                 } else {
-                     return Err(crate::error::TimeLoopError::Configuration("Storage is not encrypted but import file is.".to_string()));
-                 }
-             } else {
-                 // Not an encrypted wrapper, treat as plaintext
-                 file_bytes
-             }
+                    match Self::try_decrypt(key, &nonce, &ciphertext) {
+                        Ok(plain) => plain,
+                        Err(_) => {
+                            return Err(crate::error::TimeLoopError::Storage(
+                                "Decryption failed".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    return Err(crate::error::TimeLoopError::Configuration(
+                        "Storage is not encrypted but import file is.".to_string(),
+                    ));
+                }
+            } else {
+                // Not an encrypted wrapper, treat as plaintext
+                file_bytes
+            }
         } else {
             // Not valid UTF-8, maybe binary? Treat as is (likely fail JSON parse later if not text)
             file_bytes
         };
 
         // Parse as JSON
-        let json_str = String::from_utf8(data).map_err(|e| crate::error::TimeLoopError::Storage(format!("Invalid UTF-8 in import file: {}", e)))?;
+        let json_str = String::from_utf8(data).map_err(|e| {
+            crate::error::TimeLoopError::Storage(format!("Invalid UTF-8 in import file: {}", e))
+        })?;
         let bundle: SessionExport = serde_json::from_str(&json_str)?;
         let id = bundle.session.id.clone();
         self.store_session(&bundle.session)?;
@@ -708,7 +760,8 @@ impl Storage {
             options.mode(0o600);
         }
 
-        let mut file = options.open(&tmp)
+        let mut file = options
+            .open(&tmp)
             .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         file.write_all(bytes)
             .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
@@ -1247,7 +1300,10 @@ impl Storage {
     }
 
     fn events_log_for(path: &std::path::Path, format: PersistenceFormat) -> PathBuf {
-        let fname = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "state".to_string());
+        let fname = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "state".to_string());
         match format {
             PersistenceFormat::Json => path.with_file_name(format!("{}.events.jsonl", fname)),
             PersistenceFormat::Cbor => path.with_file_name(format!("{}.events.cborlog", fname)),
@@ -1274,6 +1330,8 @@ impl Storage {
             return Ok(());
         }
 
+        let mut events_to_load = Vec::new();
+
         if self.persistence_format == PersistenceFormat::Json {
             let file = std::fs::File::open(&path)
                 .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
@@ -1294,13 +1352,11 @@ impl Storage {
                             crate::error::TimeLoopError::Storage("decryption failed".to_string())
                         })?;
                         let event: Event = serde_json::from_slice(&plain)?;
-                        // insert event
-                        self.with_write(|g| { g.events.entry(event.session_id.clone()).or_default().push(event); })?;
+                        events_to_load.push(event);
                     }
                 } else {
                     let event: Event = serde_json::from_str(&l)?;
-                    // insert event
-                    self.with_write(|g| { g.events.entry(event.session_id.clone()).or_default().push(event); })?;
+                    events_to_load.push(event);
                 }
             }
         } else {
@@ -1309,7 +1365,9 @@ impl Storage {
                 .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             loop {
                 let mut len_buf = [0u8; 4];
-                if file.read_exact(&mut len_buf).is_err() { break; }
+                if file.read_exact(&mut len_buf).is_err() {
+                    break;
+                }
                 let len = u32::from_le_bytes(len_buf) as usize;
                 let mut buf = vec![0u8; len];
                 file.read_exact(&mut buf)
@@ -1324,14 +1382,26 @@ impl Storage {
                                 )
                             })?;
                         let event: Event = serde_cbor::from_slice(&plain)?;
-                        self.with_write(|g| { g.events.entry(event.session_id.clone()).or_default().push(event); })?;
+                        events_to_load.push(event);
                     }
                 } else {
                     // treat as raw CBOR Event
                     let event: Event = serde_cbor::from_slice(&buf)?;
-                    self.with_write(|g| { g.events.entry(event.session_id.clone()).or_default().push(event); })?;
+                    events_to_load.push(event);
                 }
             }
+        }
+
+        if !events_to_load.is_empty() {
+            self.with_write(|g| {
+                for event in events_to_load {
+                    let session_events = g.events.entry(event.session_id.clone()).or_default();
+                    // Deduplication: prevent adding events that are already present (e.g. from snapshot)
+                    if !session_events.iter().any(|e| e.id == event.id) {
+                        session_events.push(event);
+                    }
+                }
+            })?;
         }
 
         Ok(())
@@ -1428,26 +1498,24 @@ impl Default for CompactionPolicy {
 }
 
 fn global_persistence_format() -> PersistenceFormat {
-    GLOBAL_PERSISTENCE_FORMAT
+    *GLOBAL_PERSISTENCE_FORMAT
         .get_or_init(|| RwLock::new(PersistenceFormat::Json))
         .read()
         .unwrap()
-        .clone()
 }
 
 fn global_append_only() -> bool {
     *GLOBAL_APPEND_ONLY
-        .get_or_init(|| RwLock::new(false))
+        .get_or_init(|| RwLock::new(true))
         .read()
         .unwrap()
 }
 
 fn global_compaction_policy() -> CompactionPolicy {
-    GLOBAL_COMPACTION_POLICY
+    *GLOBAL_COMPACTION_POLICY
         .get_or_init(|| RwLock::new(CompactionPolicy::default()))
         .read()
         .unwrap()
-        .clone()
 }
 
 #[allow(dead_code)]
@@ -1981,7 +2049,9 @@ mod tests {
         storage.store_session(&session).unwrap();
 
         // Export session
-        storage.export_session_to_file("export-session", export_file.to_str().unwrap()).unwrap();
+        storage
+            .export_session_to_file("export-session", export_file.to_str().unwrap())
+            .unwrap();
 
         // Verify file contains salt (by reading it manually)
         let export_content = std::fs::read_to_string(&export_file).unwrap();
@@ -1997,7 +2067,9 @@ mod tests {
         assert!(storage2.get_session("export-session").unwrap().is_none());
 
         // Import
-        let id = storage2.import_session_from_file(export_file.to_str().unwrap()).unwrap();
+        let id = storage2
+            .import_session_from_file(export_file.to_str().unwrap())
+            .unwrap();
         assert_eq!(id, "export-session");
 
         let restored = storage2.get_session("export-session").unwrap().unwrap();
