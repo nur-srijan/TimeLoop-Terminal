@@ -106,6 +106,28 @@ pub struct Storage {
     pending_writes: Option<Arc<AtomicU32>>,
 }
 
+impl Clone for Storage {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            persistence_path: self.persistence_path.clone(),
+            encryption_key: self.encryption_key.clone(),
+            encryption_salt: self.encryption_salt.clone(),
+            argon2_config: self.argon2_config.clone(),
+            persistence_format: self.persistence_format,
+            append_only: self.append_only,
+            events_log_path: self.events_log_path.clone(),
+            max_log_size_bytes: self.max_log_size_bytes,
+            max_events: self.max_events,
+            retention_count: self.retention_count,
+            compaction_interval_secs: self.compaction_interval_secs,
+            background_running: self.background_running.clone(),
+            background_handle: None, // Cannot clone the background thread handle
+            pending_writes: self.pending_writes.clone(),
+        }
+    }
+}
+
 impl Storage {
     /// Set per-instance max log size in bytes (overrides global policy for this instance)
     pub fn set_max_log_size_bytes(&mut self, v: Option<u64>) {

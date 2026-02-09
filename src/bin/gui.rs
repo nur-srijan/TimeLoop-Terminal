@@ -20,6 +20,7 @@ struct TimeLoopGui {
     show_ai_panel: bool,
     show_import_dialog: bool,
     show_export_dialog: bool,
+    show_timeline_export_dialog: bool,
     
     // Settings
     api_keys: std::collections::HashMap<String, String>,
@@ -66,6 +67,7 @@ impl Default for TimeLoopGui {
             show_ai_panel: false,
             show_import_dialog: false,
             show_export_dialog: false,
+            show_timeline_export_dialog: false,
             api_keys,
             ai_model: "gpt-4".to_string(),
             theme: "Dark".to_string(),
@@ -307,6 +309,11 @@ impl eframe::App for TimeLoopGui {
             self.show_export_dialog(ctx);
         }
 
+        // Timeline export dialog
+        if self.show_timeline_export_dialog {
+            self.show_timeline_export_dialog(ctx);
+        }
+
         // Error/Success messages
         self.show_messages(ctx);
     }
@@ -383,8 +390,8 @@ impl TimeLoopGui {
 
     fn export_timeline(&mut self) {
         if let Some(ref session_id) = self.selected {
-            self.success_message = Some(format!("Exporting timeline for session: {}", session_id));
-            // TODO: Implement timeline export
+            self.export_path = format!("timeline_{}.json", session_id);
+            self.show_timeline_export_dialog = true;
         } else {
             self.error_message = Some("No session selected for export".to_string());
         }
@@ -619,6 +626,52 @@ impl TimeLoopGui {
                 });
             });
         self.show_export_dialog = show_export_dialog;
+    }
+
+    fn show_timeline_export_dialog(&mut self, ctx: &egui::Context) {
+        let mut show_dialog = self.show_timeline_export_dialog;
+        egui::Window::new("Export Timeline")
+            .open(&mut show_dialog)
+            .show(ctx, |ui| {
+                ui.label("Export timeline to JSON file:");
+                ui.text_edit_singleline(&mut self.export_path);
+
+                ui.horizontal(|ui| {
+                    if ui.button("Default Path").clicked() {
+                        if let Some(ref session_id) = self.selected {
+                             self.export_path = format!("timeline_{}.json", session_id);
+                        }
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Export").clicked() {
+                        if let Some(ref session_id) = self.selected.clone() {
+                            match SessionManager::new() {
+                                Ok(sm) => {
+                                    match sm.export_timeline_to_json(session_id, &self.export_path) {
+                                        Ok(_) => {
+                                            self.success_message = Some(format!("Timeline exported to {}", self.export_path));
+                                            self.show_timeline_export_dialog = false;
+                                        }
+                                        Err(e) => {
+                                            self.error_message = Some(format!("Failed to export timeline: {}", e));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    self.error_message = Some(format!("Failed to initialize session manager: {}", e));
+                                }
+                            }
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.show_timeline_export_dialog = false;
+                    }
+                });
+            });
+        self.show_timeline_export_dialog = show_dialog;
     }
 
     fn show_messages(&mut self, ctx: &egui::Context) {

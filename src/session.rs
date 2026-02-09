@@ -143,6 +143,13 @@ impl SessionManager {
         self.storage.delete_session(session_id)
     }
 
+    pub fn export_timeline_to_json(&self, session_id: &str, path: &str) -> crate::Result<()> {
+        let events = self.storage.get_events_for_session(session_id)?;
+        let file = std::fs::File::create(path).map_err(|e| TimeLoopError::FileSystem(e.to_string()))?;
+        serde_json::to_writer_pretty(file, &events).map_err(TimeLoopError::Serialization)?;
+        Ok(())
+    }
+
     pub fn get_session_tree(&self) -> crate::Result<Vec<SessionNode>> {
         let sessions = self.list_sessions()?;
         let mut tree = Vec::new();
@@ -187,4 +194,37 @@ impl SessionManager {
 pub struct SessionNode {
     pub session: Session,
     pub children: Vec<SessionNode>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::EventType;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_export_timeline_to_json() {
+        let tmp_dir = TempDir::new().unwrap();
+        let db_path = tmp_dir.path().join("test_export.db");
+        let storage = Storage::with_path(db_path.to_str().unwrap()).unwrap();
+        let mut session_manager = SessionManager::with_storage(storage);
+
+        // Create session and events
+        let session_id = session_manager.create_session("Test Export").unwrap();
+        let mut recorder = crate::events::EventRecorder::with_storage(&session_id, session_manager.storage.clone());
+        recorder.record_key_press("a").unwrap();
+        recorder.record_key_press("b").unwrap();
+
+        // Export
+        let export_path = tmp_dir.path().join("timeline.json");
+        session_manager.export_timeline_to_json(&session_id, export_path.to_str().unwrap()).unwrap();
+
+        // Verify
+        let content = std::fs::read_to_string(export_path).unwrap();
+        let events: Vec<crate::Event> = serde_json::from_str(&content).unwrap();
+        assert_eq!(events.len(), 2);
+        if let EventType::KeyPress { key, .. } = &events[0].event_type {
+            assert_eq!(key, "a");
+        }
+    }
 }
