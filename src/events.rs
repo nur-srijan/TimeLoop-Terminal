@@ -246,7 +246,7 @@ impl EventRecorder {
             self.sequence_counter,
         );
 
-        self.storage.store_event(&event)?;
+        self.storage.store_event(event)?;
         Ok(())
     }
 
@@ -279,7 +279,7 @@ impl EventRecorder {
             self.sequence_counter,
         );
 
-        self.storage.store_event(&event)?;
+        self.storage.store_event(event)?;
         self.current_command = None;
         Ok(())
     }
@@ -312,7 +312,7 @@ impl EventRecorder {
             self.sequence_counter,
         );
 
-        self.storage.store_event(&event)?;
+        self.storage.store_event(event)?;
         Ok(())
     }
 
@@ -335,7 +335,7 @@ impl EventRecorder {
             self.sequence_counter,
         );
 
-        self.storage.store_event(&event)?;
+        self.storage.store_event(event)?;
         Ok(())
     }
 

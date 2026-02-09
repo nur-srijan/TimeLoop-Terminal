@@ -114,7 +114,7 @@ impl BranchManager {
             let mut new_event = event.clone();
             new_event.session_id = target_session_id.to_string();
             new_event.id = Uuid::new_v4().to_string();
-            self.storage.store_event(&new_event)?;
+            self.storage.store_event(new_event)?;
         }
 
         Ok(())
