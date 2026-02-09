@@ -1,7 +1,7 @@
 #![cfg(feature = "gui")]
 
 use eframe::egui;
-use timeloop_terminal::{ReplayEngine, SessionManager};
+use timeloop_terminal::{Event, EventType, ReplayEngine, SessionManager};
 
 // Enhanced GUI app with comprehensive features
 struct TimeLoopGui {
@@ -9,6 +9,7 @@ struct TimeLoopGui {
     sessions: Vec<timeloop_terminal::session::Session>,
     selected: Option<String>,
     replay_summary: Option<timeloop_terminal::replay::ReplaySummary>,
+    replay_events: Vec<Event>,
     
     // Replay controls
     playing: bool,
@@ -59,6 +60,7 @@ impl Default for TimeLoopGui {
             sessions,
             selected: None,
             replay_summary: None,
+            replay_events: Vec::new(),
             playing: false,
             speed: 1.0,
             position_ms: 0,
@@ -328,9 +330,18 @@ impl TimeLoopGui {
         
         // Load replay summary
         if let Ok(engine) = ReplayEngine::new(session_id) {
+            if let Ok(events) = engine.get_events() {
+                self.replay_events = events;
+            } else {
+                self.replay_events.clear();
+            }
+
             if let Ok(rs) = engine.get_session_summary() {
                 self.replay_summary = Some(rs);
             }
+        } else {
+            self.replay_events.clear();
+            self.replay_summary = None;
         }
     }
 
@@ -478,8 +489,80 @@ impl TimeLoopGui {
             // Timeline visualization
             ui.group(|ui| {
                 ui.heading("📈 Timeline");
-                ui.label("Event timeline visualization would go here");
-                // TODO: Implement actual timeline visualization
+                let (rect, _response) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 60.0),
+                    egui::Sense::hover(),
+                );
+
+                // Draw timeline background
+                ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(30));
+
+                let total_duration_ms = rs.duration.num_milliseconds() as f64;
+
+                if total_duration_ms > 0.0 {
+                    if let Some(first_event) = self.replay_events.first() {
+                        let start_time = first_event.timestamp;
+
+                        // Draw events
+                        for event in &self.replay_events {
+                            let offset_ms = (event.timestamp - start_time).num_milliseconds() as f64;
+                            let t = (offset_ms / total_duration_ms) as f32;
+                            // Clamp t to [0.0, 1.0] to handle potential slight time skews
+                            let t = t.clamp(0.0, 1.0);
+                            let x = rect.min.x + t * rect.width();
+
+                            let (color, height_fraction, y_offset) = match event.event_type {
+                                EventType::Command { .. } => (egui::Color32::from_rgb(100, 149, 237), 0.8, 0.1), // Cornflower Blue
+                                EventType::FileChange { .. } => (egui::Color32::from_rgb(255, 99, 71), 0.8, 0.1), // Tomato Red
+                                EventType::TerminalState { .. } => (egui::Color32::from_gray(100), 0.4, 0.3),
+                                EventType::KeyPress { .. } => (egui::Color32::from_gray(60), 0.2, 0.4),
+                                EventType::SessionMetadata { .. } => (egui::Color32::WHITE, 0.5, 0.25),
+                            };
+
+                            let y_start = rect.min.y + rect.height() * y_offset;
+                            let y_end = y_start + rect.height() * height_fraction;
+
+                            // Use thinner lines for keypresses to avoid clutter
+                            let stroke_width = if matches!(event.event_type, EventType::KeyPress { .. }) {
+                                1.0
+                            } else {
+                                2.0
+                            };
+
+                            ui.painter().line_segment(
+                                [egui::pos2(x, y_start), egui::pos2(x, y_end)],
+                                egui::Stroke::new(stroke_width, color),
+                            );
+                        }
+                    }
+
+                    // Draw playback position indicator
+                    let playback_t = (self.position_ms as f64 / total_duration_ms) as f32;
+                    let playback_t = playback_t.clamp(0.0, 1.0);
+                    let cursor_x = rect.min.x + playback_t * rect.width();
+
+                    ui.painter().line_segment(
+                        [egui::pos2(cursor_x, rect.min.y), egui::pos2(cursor_x, rect.max.y)],
+                        egui::Stroke::new(2.0, egui::Color32::WHITE),
+                    );
+
+                    // Draw cursor triangle/head
+                    ui.painter().circle_filled(
+                        egui::pos2(cursor_x, rect.min.y),
+                        4.0,
+                        egui::Color32::WHITE,
+                    );
+                } else {
+                    ui.label("Session duration is zero, cannot display timeline.");
+                }
+
+                // Legend
+                ui.horizontal(|ui| {
+                    ui.label("Legend:");
+                    ui.colored_label(egui::Color32::from_rgb(100, 149, 237), "Command");
+                    ui.colored_label(egui::Color32::from_rgb(255, 99, 71), "File Change");
+                    ui.colored_label(egui::Color32::from_gray(100), "Terminal State");
+                });
             });
 
         } else {
