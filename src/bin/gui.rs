@@ -36,6 +36,11 @@ struct TimeLoopGui {
     import_path: String,
     export_path: String,
     
+    // Renaming
+    show_rename_dialog: bool,
+    session_to_rename: Option<String>,
+    new_session_name: String,
+
     // Error handling
     error_message: Option<String>,
     success_message: Option<String>,
@@ -75,6 +80,9 @@ impl Default for TimeLoopGui {
             ai_analyzing: false,
             import_path: String::new(),
             export_path: String::new(),
+            show_rename_dialog: false,
+            session_to_rename: None,
+            new_session_name: String::new(),
             error_message: None,
             success_message: None,
         }
@@ -212,21 +220,28 @@ impl eframe::App for TimeLoopGui {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let sessions = self.sessions.clone();
                 for s in &sessions {
-                    let is_selected = self.selected.as_deref() == Some(&s.id);
-                    if ui.selectable_label(is_selected, format!("📁 {}", s.name)).clicked() {
-                        self.select_session(&s.id);
-                    }
-                    
-                    // Context menu for each session
-                    ui.allocate_ui_with_layout(
-                        ui.available_size(),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if ui.small_button("⋯").clicked() {
-                                // TODO: Show context menu
-                            }
+                    ui.horizontal(|ui| {
+                        let is_selected = self.selected.as_deref() == Some(&s.id);
+                        if ui.selectable_label(is_selected, format!("📁 {}", s.name)).clicked() {
+                            self.select_session(&s.id);
                         }
-                    );
+
+                        // Context menu for each session
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.menu_button("⋯", |ui| {
+                                if ui.button("✏️ Rename").clicked() {
+                                    self.session_to_rename = Some(s.id.clone());
+                                    self.new_session_name = s.name.clone();
+                                    self.show_rename_dialog = true;
+                                    ui.close_menu();
+                                }
+                                if ui.button("🗑️ Delete").clicked() {
+                                    self.delete_session_by_id(&s.id);
+                                    ui.close_menu();
+                                }
+                            });
+                        });
+                    });
                 }
             });
             
@@ -307,6 +322,11 @@ impl eframe::App for TimeLoopGui {
             self.show_export_dialog(ctx);
         }
 
+        // Rename dialog
+        if self.show_rename_dialog {
+            self.show_rename_dialog(ctx);
+        }
+
         // Error/Success messages
         self.show_messages(ctx);
     }
@@ -355,18 +375,25 @@ impl TimeLoopGui {
     }
 
     fn delete_selected_session(&mut self) {
-        if let Some(ref session_id) = self.selected {
-            if let Ok(mut sm) = SessionManager::new() {
-                match sm.delete_session(session_id) {
-                    Ok(_) => {
-                        self.success_message = Some("Session deleted successfully".to_string());
+        if let Some(session_id) = self.selected.clone() {
+            self.delete_session_by_id(&session_id);
+        }
+    }
+
+    fn delete_session_by_id(&mut self, session_id: &str) {
+        if let Ok(mut sm) = SessionManager::new() {
+            match sm.delete_session(session_id) {
+                Ok(_) => {
+                    self.success_message = Some("Session deleted successfully".to_string());
+                    // If we deleted the currently selected session, clear selection
+                    if self.selected.as_deref() == Some(session_id) {
                         self.selected = None;
                         self.replay_summary = None;
-                        self.refresh_sessions();
                     }
-                    Err(e) => {
-                        self.error_message = Some(format!("Failed to delete session: {}", e));
-                    }
+                    self.refresh_sessions();
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Failed to delete session: {}", e));
                 }
             }
         }
@@ -619,6 +646,37 @@ impl TimeLoopGui {
                 });
             });
         self.show_export_dialog = show_export_dialog;
+    }
+
+    fn show_rename_dialog(&mut self, ctx: &egui::Context) {
+        let mut show_rename_dialog = self.show_rename_dialog;
+        egui::Window::new("Rename Session")
+            .open(&mut show_rename_dialog)
+            .show(ctx, |ui| {
+                ui.label("Enter new session name:");
+                ui.text_edit_singleline(&mut self.new_session_name);
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Rename").clicked() {
+                        if let Some(ref session_id) = self.session_to_rename.clone() {
+                            if let Ok(mut sm) = SessionManager::new() {
+                                if let Err(e) = sm.rename_session(session_id, &self.new_session_name) {
+                                    self.error_message = Some(format!("Failed to rename session: {}", e));
+                                } else {
+                                    self.success_message = Some("Session renamed successfully".to_string());
+                                    self.refresh_sessions();
+                                    self.show_rename_dialog = false;
+                                }
+                            }
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.show_rename_dialog = false;
+                    }
+                });
+            });
+        self.show_rename_dialog = show_rename_dialog;
     }
 
     fn show_messages(&mut self, ctx: &egui::Context) {
