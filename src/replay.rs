@@ -237,6 +237,10 @@ impl ReplayEngine {
         Ok(())
     }
 
+    pub fn get_events(&self) -> crate::Result<Vec<Event>> {
+        self.storage.get_events_for_session(&self.session_id)
+    }
+
     pub fn get_session_summary(&self) -> crate::Result<ReplaySummary> {
         let events = self.storage.get_events_for_session(&self.session_id)?;
 
