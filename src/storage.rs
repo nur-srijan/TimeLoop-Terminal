@@ -475,16 +475,16 @@ impl Storage {
                 .get(session_id)
                 .map(|events| {
                     let len = events.len();
+                    if n == 0 {
+                        return Vec::new();
+                    }
                     if n >= len {
                         return events.clone();
                     }
 
-                    let mut indices: Vec<usize> = (0..len).collect();
-                    indices.select_nth_unstable_by_key(len - n, |&i| events[i].sequence_number);
-                    indices[len - n..]
-                        .iter()
-                        .map(|&i| events[i].clone())
-                        .collect()
+                    let mut events = events.clone();
+                    events.select_nth_unstable_by_key(len - n, |e| e.sequence_number);
+                    events.split_off(len - n)
                 })
                 .unwrap_or_default()
         })
@@ -2063,5 +2063,28 @@ mod tests {
         let mut got_seqs: Vec<u64> = result.iter().map(|e| e.sequence_number).collect();
         got_seqs.sort();
         assert_eq!(got_seqs, (0..10).map(|i| i as u64).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_get_last_n_events_zero() {
+        let tmp_dir = TempDir::new().unwrap();
+        let storage = Storage::with_path(tmp_dir.path().join("state.json").to_str().unwrap()).unwrap();
+        let session_id = "test-last-n-zero";
+
+        let event = Event {
+            id: Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            event_type: EventType::KeyPress {
+                key: "a".to_string(),
+                timestamp: Utc::now(),
+            },
+            sequence_number: 1,
+            timestamp: Utc::now(),
+        };
+        storage.store_event(&event).unwrap();
+
+        // Getting 0 events should return empty list and NOT panic
+        let result = storage.get_last_n_events(session_id, 0).unwrap();
+        assert!(result.is_empty());
     }
 }
