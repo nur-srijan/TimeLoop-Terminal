@@ -3,6 +3,15 @@
 use eframe::egui;
 use timeloop_terminal::{ReplayEngine, SessionManager};
 use std::sync::mpsc;
+use once_cell::sync::Lazy;
+use tokio::runtime::Runtime;
+
+static TOKIO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create Tokio runtime")
+});
 
 // Enhanced GUI app with comprehensive features
 struct TimeLoopGui {
@@ -440,22 +449,13 @@ impl TimeLoopGui {
         let (tx, rx) = mpsc::channel();
         self.ai_response_receiver = Some(rx);
 
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-
-            let result = match rt {
-                Ok(rt) => rt.block_on(async {
-                    timeloop_terminal::ai::send_chat_request(
-                        &model,
-                        "You are a helpful assistant.",
-                        &prompt,
-                        api_key
-                    ).await
-                }),
-                Err(e) => Err(timeloop_terminal::error::TimeLoopError::Unknown(e.to_string())),
-            };
+        TOKIO_RUNTIME.spawn(async move {
+            let result = timeloop_terminal::ai::send_chat_request(
+                &model,
+                "You are a helpful assistant.",
+                &prompt,
+                api_key
+            ).await;
 
             let _ = tx.send(result);
         });
