@@ -405,6 +405,7 @@ impl TimeLoopGui {
 
             let session_id = session_id.clone();
             let model = self.ai_model.clone();
+            let api_key = self.api_keys.get("openai").cloned().or_else(|| self.api_keys.get("anthropic").cloned());
             let tx = self.ai_sender.clone();
 
             std::thread::spawn(move || {
@@ -417,7 +418,7 @@ impl TimeLoopGui {
                         let res = rt.block_on(async {
                             #[cfg(feature = "ai")]
                             {
-                                timeloop_terminal::ai::summarize_session(&session_id, &model).await
+                                timeloop_terminal::ai::summarize_session(&session_id, &model, api_key).await
                             }
                             #[cfg(not(feature = "ai"))]
                             {
