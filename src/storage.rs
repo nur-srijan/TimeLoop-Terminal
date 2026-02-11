@@ -1393,12 +1393,29 @@ impl Storage {
         }
 
         if !events_to_load.is_empty() {
+            // Optimize deduplication:
+            // 1. Group new events by session_id
+            let mut events_by_session: HashMap<String, Vec<Event>> = HashMap::new();
+            for event in events_to_load {
+                events_by_session
+                    .entry(event.session_id.clone())
+                    .or_default()
+                    .push(event);
+            }
+
             self.with_write(|g| {
-                for event in events_to_load {
-                    let session_events = g.events.entry(event.session_id.clone()).or_default();
-                    // Deduplication: prevent adding events that are already present (e.g. from snapshot)
-                    if !session_events.iter().any(|e| e.id == event.id) {
-                        session_events.push(event);
+                for (session_id, new_events) in events_by_session {
+                    let session_events = g.events.entry(session_id).or_default();
+                    // 2. Build a HashSet of existing event IDs for O(1) lookup
+                    let mut existing_ids: std::collections::HashSet<String> =
+                        session_events.iter().map(|e| e.id.clone()).collect();
+
+                    // 3. Filter and append only new events
+                    for event in new_events {
+                        if !existing_ids.contains(&event.id) {
+                            session_events.push(event.clone());
+                            existing_ids.insert(event.id); // Update set to prevent dups within the log batch itself
+                        }
                     }
                 }
             })?;
