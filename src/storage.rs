@@ -558,6 +558,9 @@ impl Storage {
                 .get(session_id)
                 .map(|events| {
                     let len = events.len();
+                    if n == 0 {
+                        return Vec::new();
+                    }
                     if n >= len {
                         return events.clone();
                     }
@@ -2107,5 +2110,68 @@ mod tests {
 
         // When storage goes out of scope, it should zeroize inner
         drop(storage);
+    }
+
+    #[test]
+    fn test_get_last_n_events() {
+        let tmp_dir = TempDir::new().unwrap();
+        let storage = Storage::with_path(tmp_dir.path().join("state.json").to_str().unwrap()).unwrap();
+        let session_id = "test-last-n";
+
+        // Insert events with mixed sequence numbers to test sorting
+        // Let's insert: seq 5, 1, 9, 3, 7, 2, 8, 4, 0, 6
+        let seqs = [5, 1, 9, 3, 7, 2, 8, 4, 0, 6];
+        for &s in &seqs {
+            let event = Event {
+                id: Uuid::new_v4().to_string(),
+                session_id: session_id.to_string(),
+                event_type: EventType::KeyPress {
+                    key: "a".to_string(),
+                    timestamp: Utc::now(),
+                },
+                sequence_number: s,
+                timestamp: Utc::now(),
+            };
+            storage.store_event(&event).unwrap();
+        }
+
+        // We want last 3 events. Should be sequence numbers 7, 8, 9.
+        let result = storage.get_last_n_events(session_id, 3).unwrap();
+        assert_eq!(result.len(), 3);
+
+        // Verify we got 7, 8, 9
+        let mut got_seqs: Vec<u64> = result.iter().map(|e| e.sequence_number).collect();
+        got_seqs.sort();
+        assert_eq!(got_seqs, vec![7, 8, 9]);
+
+        // Test getting more than available
+        let result = storage.get_last_n_events(session_id, 20).unwrap();
+        assert_eq!(result.len(), 10);
+        let mut got_seqs: Vec<u64> = result.iter().map(|e| e.sequence_number).collect();
+        got_seqs.sort();
+        assert_eq!(got_seqs, (0..10).map(|i| i as u64).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_get_last_n_events_zero() {
+        let tmp_dir = TempDir::new().unwrap();
+        let storage = Storage::with_path(tmp_dir.path().join("state.json").to_str().unwrap()).unwrap();
+        let session_id = "test-last-n-zero";
+
+        let event = Event {
+            id: Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            event_type: EventType::KeyPress {
+                key: "a".to_string(),
+                timestamp: Utc::now(),
+            },
+            sequence_number: 1,
+            timestamp: Utc::now(),
+        };
+        storage.store_event(&event).unwrap();
+
+        // Getting 0 events should return empty list and NOT panic
+        let result = storage.get_last_n_events(session_id, 0).unwrap();
+        assert!(result.is_empty());
     }
 }
