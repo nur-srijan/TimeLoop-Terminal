@@ -73,4 +73,21 @@ mod tests {
         let retrieved = storage.get_session("test-id").unwrap().unwrap();
         assert_eq!(retrieved.name, session.name);
     }
+
+    #[test]
+    fn test_session_rename() {
+        let tmp_dir = TempDir::new().unwrap();
+        let db_path = tmp_dir.path().join("events.db");
+        let storage = Storage::with_path(db_path.to_str().unwrap()).unwrap();
+        let mut session_manager = SessionManager::with_storage(storage);
+
+        let session_id = session_manager.create_session("original-name").unwrap();
+
+        // Rename
+        session_manager.rename_session(&session_id, "new-name").unwrap();
+
+        // Verify
+        let session = session_manager.get_session(&session_id).unwrap().unwrap();
+        assert_eq!(session.name, "new-name");
+    }
 }

@@ -89,6 +89,14 @@ impl SessionManager {
         Ok(())
     }
 
+    pub fn rename_session(&mut self, session_id: &str, new_name: &str) -> crate::Result<()> {
+        if let Some(mut session) = self.get_session(session_id)? {
+            session.name = new_name.to_string();
+            self.storage.store_session(&session)?;
+        }
+        Ok(())
+    }
+
     pub fn get_session(&self, session_id: &str) -> crate::Result<Option<Session>> {
         self.storage.get_session(session_id)
     }
