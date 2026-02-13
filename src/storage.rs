@@ -149,6 +149,7 @@ static WRITE_QUEUE: Lazy<Mutex<SyncSender<WriteCommand>>> = Lazy::new(|| {
                     if let Err(e) = file.write_all(&content) {
                         tracing::error!("Failed to append to log file {}: {}", path.display(), e);
                     }
+                    content.zeroize();
                     let _ = file.flush();
                 }
                 WriteCommand::Flush { resp } => {
