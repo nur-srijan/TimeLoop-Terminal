@@ -1538,7 +1538,7 @@ impl Storage {
             file.flush()
                 .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         }
-
+        content.zeroize();
         Ok(())
     }
 }
