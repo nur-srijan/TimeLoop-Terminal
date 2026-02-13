@@ -666,8 +666,19 @@ impl TimeLoopGui {
                 
                 ui.horizontal(|ui| {
                     if ui.button("Browse").clicked() {
-                        // TODO: Implement file browser
-                        self.export_path = "path/to/export.json".to_string();
+                        let mut dialog = rfd::FileDialog::new()
+                            .add_filter("JSON", &["json"])
+                            .set_file_name("session_export.json");
+
+                        if let Some(dir) = dirs::document_dir() {
+                            dialog = dialog.set_directory(&dir);
+                        } else if let Some(dir) = dirs::home_dir() {
+                            dialog = dialog.set_directory(&dir);
+                        }
+
+                        if let Some(path) = dialog.save_file() {
+                            self.export_path = path.to_string_lossy().to_string();
+                        }
                     }
                 });
                 
