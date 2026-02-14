@@ -22,6 +22,10 @@ use crate::branch::TimelineBranch;
 use crate::session::Session;
 use crate::Event;
 
+const KEY_LEN: usize = 32;
+const SALT_LEN: usize = 16;
+const NONCE_LEN: usize = 24;
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct StorageInner {
     events: HashMap<String, Vec<Event>>,       // session_id -> events
@@ -168,7 +172,7 @@ pub struct Storage {
     inner: Option<Arc<RwLock<StorageInner>>>,
     persistence_path: Option<PathBuf>,
     // Encryption support
-    encryption_key: Option<[u8; 32]>,
+    encryption_key: Option<[u8; KEY_LEN]>,
     encryption_salt: Option<Vec<u8>>,
     // Argon2 params used to derive keys for this storage instance
     argon2_config: Option<Argon2Config>,
@@ -390,7 +394,7 @@ impl Storage {
         let pb = PathBuf::from(path);
         let inner = Arc::new(RwLock::new(StorageInner::default()));
 
-        let mut encryption_key: Option<[u8; 32]> = None;
+        let mut encryption_key: Option<[u8; KEY_LEN]> = None;
         let mut encryption_salt: Option<Vec<u8>> = None;
         if pb.exists() {
             if let Ok(bytes) = std::fs::read(&pb) {
@@ -458,7 +462,7 @@ impl Storage {
 
         // If file didn't exist or wasn't encrypted, generate a salt now
         if encryption_salt.is_none() {
-            let salt = Self::generate_random_bytes(16);
+            let salt = Self::generate_random_bytes(SALT_LEN);
             let key = Self::derive_key_with_params(passphrase, &salt, Some(params));
             encryption_key = Some(key);
             encryption_salt = Some(salt);
@@ -467,10 +471,6 @@ impl Storage {
         let gp = global_compaction_policy();
         let pending_writes = Arc::new(AtomicU32::new(0));
         Ok(Self { inner: Some(inner), persistence_path: Some(pb), encryption_key, encryption_salt, argon2_config: Some(params.clone()), persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None, pending_writes: Some(pending_writes) })
-    }
-
-    pub fn get_db_path() -> crate::Result<std::path::PathBuf> {
-        Ok(std::path::PathBuf::from("/tmp/timeloop-memory"))
     }
 
     // Helper to run read-only closures against the correct storage instance
@@ -1211,13 +1211,13 @@ impl Storage {
         Ok(())
     }
 
-    // Encrypt given plaintext with the given 32-byte key using XChaCha20-Poly1305.
-    fn encrypt_bytes(key: &[u8; 32], plaintext: &[u8]) -> crate::Result<(Vec<u8>, Vec<u8>)> {
+    // Encrypt given plaintext with the given key using XChaCha20-Poly1305.
+    fn encrypt_bytes(key: &[u8; KEY_LEN], plaintext: &[u8]) -> crate::Result<(Vec<u8>, Vec<u8>)> {
         use chacha20poly1305::aead::{Aead, KeyInit};
         use chacha20poly1305::XChaCha20Poly1305;
         use chacha20poly1305::XNonce;
         let cipher = XChaCha20Poly1305::new(key.into());
-        let nonce = Self::generate_random_bytes(24);
+        let nonce = Self::generate_random_bytes(NONCE_LEN);
         let nonce_arr = XNonce::from_slice(&nonce);
         let ciphertext = cipher.encrypt(nonce_arr, plaintext).map_err(|e| {
             crate::error::TimeLoopError::FileSystem(format!("Encryption failed: {}", e))
@@ -1225,7 +1225,7 @@ impl Storage {
         Ok((nonce, ciphertext))
     }
 
-    fn try_decrypt(key: &[u8; 32], nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, ()> {
+    fn try_decrypt(key: &[u8; KEY_LEN], nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, ()> {
         use chacha20poly1305::aead::{Aead, KeyInit};
         use chacha20poly1305::XChaCha20Poly1305;
         use chacha20poly1305::XNonce;
@@ -1234,14 +1234,14 @@ impl Storage {
         cipher.decrypt(nonce_arr, ciphertext).map_err(|_| ())
     }
 
-    // Derive a 32-byte key from passphrase + salt using PBKDF2-HMAC-SHA256
+    // Derive a key from passphrase + salt using Argon2
     fn derive_key_with_params(
         passphrase: &str,
         salt: &[u8],
         params: Option<&Argon2Config>,
-    ) -> [u8; 32] {
+    ) -> [u8; KEY_LEN] {
         let config = params.cloned().unwrap_or_default();
-        let mut key = [0u8; 32];
+        let mut key = [0u8; KEY_LEN];
         use argon2::{Algorithm, Params, Version};
         let params = Params::new(
             config.memory_kib,
@@ -1258,10 +1258,11 @@ impl Storage {
     }
 
     fn generate_random_bytes(len: usize) -> Vec<u8> {
-        let mut buf = vec![0u8; len];
         let mut osrng = rand::rngs::OsRng;
-        osrng.fill_bytes(&mut buf);
-        buf
+        std::iter::repeat_with(|| osrng.next_u32().to_ne_bytes())
+            .flatten()
+            .take(len)
+            .collect()
     }
 
     /// Change the passphrase used to encrypt the storage. When called, the current
@@ -1291,7 +1292,7 @@ impl Storage {
         let mut data_bytes = serde_json::to_vec_pretty(&data_inner)?;
 
         // Generate new salt and derive new key
-        let salt = Self::generate_random_bytes(16);
+        let salt = Self::generate_random_bytes(SALT_LEN);
         let new_key =
             Self::derive_key_with_params(new_passphrase, &salt, self.argon2_config.as_ref());
 
