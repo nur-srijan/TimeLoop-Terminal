@@ -1258,11 +1258,13 @@ impl Storage {
     }
 
     fn generate_random_bytes(len: usize) -> Vec<u8> {
+    fn generate_random_bytes(len: usize) -> crate::Result<Vec<u8>> {
+        let mut buf = vec![0u8; len];
         let mut osrng = rand::rngs::OsRng;
-        std::iter::repeat_with(|| osrng.next_u32().to_ne_bytes())
-            .flatten()
-            .take(len)
-            .collect()
+        osrng
+            .try_fill_bytes(&mut buf)
+            .map_err(|e| crate::error::TimeLoopError::Storage(format!("Failed to generate random bytes: {}", e)))?;
+        Ok(buf)
     }
 
     /// Change the passphrase used to encrypt the storage. When called, the current
