@@ -462,7 +462,7 @@ impl Storage {
 
         // If file didn't exist or wasn't encrypted, generate a salt now
         if encryption_salt.is_none() {
-            let salt = Self::generate_random_bytes(SALT_LEN);
+            let salt = Self::generate_random_bytes(SALT_LEN)?;
             let key = Self::derive_key_with_params(passphrase, &salt, Some(params));
             encryption_key = Some(key);
             encryption_salt = Some(salt);
@@ -1217,7 +1217,7 @@ impl Storage {
         use chacha20poly1305::XChaCha20Poly1305;
         use chacha20poly1305::XNonce;
         let cipher = XChaCha20Poly1305::new(key.into());
-        let nonce = Self::generate_random_bytes(NONCE_LEN);
+        let nonce = Self::generate_random_bytes(NONCE_LEN)?;
         let nonce_arr = XNonce::from_slice(&nonce);
         let ciphertext = cipher.encrypt(nonce_arr, plaintext).map_err(|e| {
             crate::error::TimeLoopError::FileSystem(format!("Encryption failed: {}", e))
@@ -1257,7 +1257,6 @@ impl Storage {
         key
     }
 
-    fn generate_random_bytes(len: usize) -> Vec<u8> {
     fn generate_random_bytes(len: usize) -> crate::Result<Vec<u8>> {
         let mut buf = vec![0u8; len];
         let mut osrng = rand::rngs::OsRng;
@@ -1294,7 +1293,7 @@ impl Storage {
         let mut data_bytes = serde_json::to_vec_pretty(&data_inner)?;
 
         // Generate new salt and derive new key
-        let salt = Self::generate_random_bytes(SALT_LEN);
+        let salt = Self::generate_random_bytes(SALT_LEN)?;
         let new_key =
             Self::derive_key_with_params(new_passphrase, &salt, self.argon2_config.as_ref());
 
