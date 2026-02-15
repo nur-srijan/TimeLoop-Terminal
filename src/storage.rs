@@ -427,7 +427,7 @@ impl Storage {
         // If append-only logging is enabled, append event to the log; otherwise
         // persist the full state as before.
         if self.append_only {
-            let _ = self.append_event_to_log(&event);
+            self.append_event_to_log(&event)?;
         }
 
         // Always update in-memory storage
