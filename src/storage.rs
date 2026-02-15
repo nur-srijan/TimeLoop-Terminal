@@ -438,9 +438,9 @@ impl Storage {
 
         if !self.append_only {
             if let Some(path) = &self.persistence_path {
-                let _ = Self::save_to_path(path, self);
+                Self::save_to_path(path, self)?;
             } else if self.inner.is_none() {
-                let _ = Self::save_to_disk();
+                Self::save_to_disk()?;
             }
         }
         Ok(())
