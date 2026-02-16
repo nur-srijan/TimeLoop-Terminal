@@ -15,6 +15,10 @@ static TOKIO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 
 // Enhanced GUI app with comprehensive features
 struct TimeLoopGui {
+    // AI communication
+    ai_sender: Sender<Result<String, String>>,
+    ai_receiver: Receiver<Result<String, String>>,
+
     // Session management
     sessions: Vec<timeloop_terminal::session::Session>,
     selected: Option<String>,
@@ -41,7 +45,6 @@ struct TimeLoopGui {
     ai_prompt: String,
     ai_response: String,
     ai_analyzing: bool,
-    ai_response_receiver: Option<mpsc::Receiver<timeloop_terminal::Result<String>>>,
     
     // Import/Export
     import_path: String,
@@ -54,6 +57,7 @@ struct TimeLoopGui {
 
 impl Default for TimeLoopGui {
     fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut sessions = Vec::new();
         if let Ok(sm) = SessionManager::new() {
             if let Ok(list) = sm.list_sessions() {
@@ -67,6 +71,8 @@ impl Default for TimeLoopGui {
         api_keys.insert("local".to_string(), String::new());
         
         Self {
+            ai_sender: tx,
+            ai_receiver: rx,
             sessions,
             selected: None,
             replay_summary: None,
@@ -84,7 +90,6 @@ impl Default for TimeLoopGui {
             ai_prompt: String::new(),
             ai_response: String::new(),
             ai_analyzing: false,
-            ai_response_receiver: None,
             import_path: String::new(),
             export_path: String::new(),
             error_message: None,
@@ -96,31 +101,16 @@ impl Default for TimeLoopGui {
 impl eframe::App for TimeLoopGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Poll for AI response
-        let mut response_received = None;
-        if let Some(ref rx) = self.ai_response_receiver {
-            match rx.try_recv() {
-                Ok(result) => {
-                    response_received = Some(result);
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    // Still waiting
-                    ctx.request_repaint(); // Keep repainting to show animation/status if needed
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                     response_received = Some(Err(timeloop_terminal::error::TimeLoopError::Unknown("AI request channel disconnected unexpectedly".to_string())));
-                }
-            }
-        }
-
-        if let Some(result) = response_received {
+        while let Ok(result) = self.ai_receiver.try_recv() {
             self.ai_analyzing = false;
-            self.ai_response_receiver = None; // clear receiver
             match result {
-                Ok(response) => self.ai_response = response,
+                Ok(response) => {
+                    self.ai_response = response;
+                    self.success_message = Some("AI response received".to_string());
+                }
                 Err(e) => {
-                    let msg = e.to_string();
-                    self.ai_response = format!("Error: {}", msg);
-                    self.error_message = Some(msg);
+                    self.ai_response = format!("Error: {}", e);
+                    self.error_message = Some(format!("AI request failed: {}", e));
                 }
             }
             ctx.request_repaint();
@@ -418,7 +408,36 @@ impl TimeLoopGui {
     fn analyze_session(&mut self) {
         if let Some(ref session_id) = self.selected {
             self.success_message = Some(format!("Analyzing session: {}", session_id));
-            // TODO: Implement actual analysis
+            self.ai_analyzing = true;
+            self.show_ai_panel = true;
+            self.ai_response = "Analyzing session... please wait.".to_string();
+
+            let session_id = session_id.clone();
+            let model = self.ai_model.clone();
+            let api_key = self.api_keys.get("openai").cloned().or_else(|| self.api_keys.get("anthropic").cloned());
+            let tx = self.ai_sender.clone();
+
+            TOKIO_RUNTIME.spawn(async move {
+                let res = {
+                    #[cfg(feature = "ai")]
+                    {
+                        timeloop_terminal::ai::summarize_session(&session_id, &model, api_key).await
+                    }
+                    #[cfg(not(feature = "ai"))]
+                    {
+                        Err(timeloop_terminal::TimeLoopError::Configuration(format!(
+                            "AI feature not enabled. Cannot analyze session '{}' with model '{}'. Please run with --features ai",
+                            session_id, model
+                        )))
+                    }
+                };
+
+                let msg = match res {
+                    Ok(summary) => Ok(summary),
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = tx.send(msg);
+            });
         } else {
             self.error_message = Some("No session selected for analysis".to_string());
         }
@@ -446,8 +465,7 @@ impl TimeLoopGui {
         let model = self.ai_model.clone();
         let api_key = self.api_keys.get("openai").cloned().filter(|s| !s.is_empty());
 
-        let (tx, rx) = mpsc::channel();
-        self.ai_response_receiver = Some(rx);
+        let tx = self.ai_sender.clone();
 
         TOKIO_RUNTIME.spawn(async move {
             let result = timeloop_terminal::ai::send_chat_request(
@@ -457,7 +475,11 @@ impl TimeLoopGui {
                 api_key
             ).await;
 
-            let _ = tx.send(result);
+            let msg = match result {
+                Ok(response) => Ok(response),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(msg);
         });
     }
 
