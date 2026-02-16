@@ -679,7 +679,7 @@ impl TimeLoopGui {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Export").clicked() {
-                        if let Some(ref session_id) = self.selected.clone() {
+                        if let Some(session_id) = &self.selected {
                             // Ensure we have a session manager
                             if self.session_manager.is_none() {
                                  if let Ok(sm) = SessionManager::new() {
