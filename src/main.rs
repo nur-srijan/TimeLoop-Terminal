@@ -530,7 +530,7 @@ async fn import_session(input: &str) -> Result<(), TimeLoopError> {
 #[cfg(feature = "ai")]
 async fn run_ai_summarize(session_id: &str, model: Option<&str>) -> Result<(), TimeLoopError> {
     let model = model.unwrap_or("openrouter/auto");
-    let summary = timeloop_terminal::ai::summarize_session(session_id, model).await?;
+    let summary = timeloop_terminal::ai::summarize_session(session_id, model, None).await?;
     println!("{}", summary);
     Ok(())
 }
