@@ -562,6 +562,7 @@ impl TimeLoopGui {
                     ui.colored_label(egui::Color32::from_rgb(100, 149, 237), "Command");
                     ui.colored_label(egui::Color32::from_rgb(255, 99, 71), "File Change");
                     ui.colored_label(egui::Color32::from_gray(100), "Terminal State");
+                    ui.colored_label(egui::Color32::from_gray(60), "Key Press");
                 });
             });
 
