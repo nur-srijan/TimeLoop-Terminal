@@ -2,14 +2,18 @@
 
 use eframe::egui;
 use timeloop_terminal::{Event, EventType, ReplayEngine, SessionManager};
-use std::sync::mpsc::{Receiver, Sender};
 
 // Enhanced GUI app with comprehensive features
-struct TimeLoopGui {
-    // AI communication
-    ai_sender: Sender<Result<String, String>>,
-    ai_receiver: Receiver<Result<String, String>>,
+// Timeline visualization constants
+const TIMELINE_HEIGHT: f32 = 60.0;
+const TIMELINE_BG_COLOR: egui::Color32 = egui::Color32::from_rgb(30, 30, 30);
+const COLOR_COMMAND: egui::Color32 = egui::Color32::from_rgb(100, 149, 237); // Cornflower Blue
+const COLOR_FILE_CHANGE: egui::Color32 = egui::Color32::from_rgb(255, 99, 71); // Tomato Red
+const COLOR_TERMINAL: egui::Color32 = egui::Color32::from_rgb(100, 100, 100);
+const COLOR_KEYPRESS: egui::Color32 = egui::Color32::from_rgb(60, 60, 60);
+const COLOR_METADATA: egui::Color32 = egui::Color32::WHITE;
 
+struct TimeLoopGui {
     // Session management
     sessions: Vec<timeloop_terminal::session::Session>,
     selected: Option<String>,
@@ -49,7 +53,6 @@ struct TimeLoopGui {
 
 impl Default for TimeLoopGui {
     fn default() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
         let mut sessions = Vec::new();
         if let Ok(sm) = SessionManager::new() {
             if let Ok(list) = sm.list_sessions() {
@@ -63,8 +66,6 @@ impl Default for TimeLoopGui {
         api_keys.insert("local".to_string(), String::new());
         
         Self {
-            ai_sender: tx,
-            ai_receiver: rx,
             sessions,
             selected: None,
             replay_summary: None,
@@ -93,22 +94,6 @@ impl Default for TimeLoopGui {
 
 impl eframe::App for TimeLoopGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Check for AI results
-        if let Ok(result) = self.ai_receiver.try_recv() {
-            self.ai_analyzing = false;
-            match result {
-                Ok(response) => {
-                    self.ai_response = response;
-                    self.success_message = Some("AI analysis complete".to_string());
-                }
-                Err(e) => {
-                    self.ai_response = format!("Error: {}", e);
-                    self.error_message = Some(format!("AI analysis failed: {}", e));
-                }
-            }
-            ctx.request_repaint();
-        }
-
         // Clear messages after a delay
         if self.error_message.is_some() || self.success_message.is_some() {
             ctx.request_repaint();
@@ -355,13 +340,11 @@ impl TimeLoopGui {
         // Load replay summary
         if let Ok(engine) = ReplayEngine::new(session_id) {
             if let Ok(events) = engine.get_events() {
+                self.replay_summary = Some(ReplayEngine::calculate_summary(&events));
                 self.replay_events = events;
             } else {
                 self.replay_events.clear();
-            }
-
-            if let Ok(rs) = engine.get_session_summary() {
-                self.replay_summary = Some(rs);
+                self.replay_summary = None;
             }
         } else {
             self.replay_events.clear();
@@ -410,47 +393,7 @@ impl TimeLoopGui {
     fn analyze_session(&mut self) {
         if let Some(ref session_id) = self.selected {
             self.success_message = Some(format!("Analyzing session: {}", session_id));
-            self.ai_analyzing = true;
-            self.show_ai_panel = true;
-            self.ai_response = "Analyzing session... please wait.".to_string();
-
-            let session_id = session_id.clone();
-            let model = self.ai_model.clone();
-            let api_key = self.api_keys.get("openai").cloned().or_else(|| self.api_keys.get("anthropic").cloned());
-            let tx = self.ai_sender.clone();
-
-            std::thread::spawn(move || {
-                let rt_result = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build();
-
-                match rt_result {
-                    Ok(rt) => {
-                        let res = rt.block_on(async {
-                            #[cfg(feature = "ai")]
-                            {
-                                timeloop_terminal::ai::summarize_session(&session_id, &model, api_key).await
-                            }
-                            #[cfg(not(feature = "ai"))]
-                            {
-                                Err(timeloop_terminal::TimeLoopError::Configuration(format!(
-                                    "AI feature not enabled. Cannot analyze session '{}' with model '{}'. Please run with --features ai",
-                                    session_id, model
-                                )))
-                            }
-                        });
-
-                        let msg = match res {
-                            Ok(summary) => Ok(summary),
-                            Err(e) => Err(e.to_string()),
-                        };
-                        let _ = tx.send(msg);
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(format!("Failed to create runtime: {}", e)));
-                    }
-                }
-            });
+            // TODO: Implement actual analysis
         } else {
             self.error_message = Some("No session selected for analysis".to_string());
         }
@@ -554,12 +497,12 @@ impl TimeLoopGui {
             ui.group(|ui| {
                 ui.heading("📈 Timeline");
                 let (rect, _response) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), 60.0),
+                    egui::vec2(ui.available_width(), TIMELINE_HEIGHT),
                     egui::Sense::hover(),
                 );
 
                 // Draw timeline background
-                ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(30));
+                ui.painter().rect_filled(rect, 4.0, TIMELINE_BG_COLOR);
 
                 let total_duration_ms = rs.duration.num_milliseconds() as f64;
 
@@ -576,11 +519,11 @@ impl TimeLoopGui {
                             let x = rect.min.x + t * rect.width();
 
                             let (color, height_fraction, y_offset) = match event.event_type {
-                                EventType::Command { .. } => (egui::Color32::from_rgb(100, 149, 237), 0.8, 0.1), // Cornflower Blue
-                                EventType::FileChange { .. } => (egui::Color32::from_rgb(255, 99, 71), 0.8, 0.1), // Tomato Red
-                                EventType::TerminalState { .. } => (egui::Color32::from_gray(100), 0.4, 0.3),
-                                EventType::KeyPress { .. } => (egui::Color32::from_gray(60), 0.2, 0.4),
-                                EventType::SessionMetadata { .. } => (egui::Color32::WHITE, 0.5, 0.25),
+                                EventType::Command { .. } => (COLOR_COMMAND, 0.8, 0.1),
+                                EventType::FileChange { .. } => (COLOR_FILE_CHANGE, 0.8, 0.1),
+                                EventType::TerminalState { .. } => (COLOR_TERMINAL, 0.4, 0.3),
+                                EventType::KeyPress { .. } => (COLOR_KEYPRESS, 0.2, 0.4),
+                                EventType::SessionMetadata { .. } => (COLOR_METADATA, 0.5, 0.25),
                             };
 
                             let y_start = rect.min.y + rect.height() * y_offset;
@@ -623,10 +566,9 @@ impl TimeLoopGui {
                 // Legend
                 ui.horizontal(|ui| {
                     ui.label("Legend:");
-                    ui.colored_label(egui::Color32::from_rgb(100, 149, 237), "Command");
-                    ui.colored_label(egui::Color32::from_rgb(255, 99, 71), "File Change");
-                    ui.colored_label(egui::Color32::from_gray(100), "Terminal State");
-                    ui.colored_label(egui::Color32::from_gray(60), "Key Press");
+                    ui.colored_label(COLOR_COMMAND, "Command");
+                    ui.colored_label(COLOR_FILE_CHANGE, "File Change");
+                    ui.colored_label(COLOR_TERMINAL, "Terminal State");
                 });
             });
 
