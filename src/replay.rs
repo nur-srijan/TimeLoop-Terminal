@@ -7,8 +7,7 @@ use crossterm::{
 };
 use std::io::Write;
 use std::time::Duration;
-use tokio::sync::mpsc;
-use tokio::time::{sleep, sleep_until, Instant};
+use tokio::time::{sleep, Instant};
 
 pub struct ReplayEngine {
     storage: Storage,
@@ -44,28 +43,6 @@ impl ReplayEngine {
         let mut current_speed = if speed <= 0.0 { 1.0 } else { speed };
         let mut paused = false;
 
-        // Spawn a background thread to handle input so we don't block the async executor
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        // Use std::thread instead of spawn_blocking to ensure we have a dedicated thread
-        // for blocking poll operations without occupying a thread from the blocking pool forever.
-        std::thread::spawn(move || {
-            // Poll with a short timeout to check for exit conditions
-            while let Ok(available) = event::poll(Duration::from_millis(100)) {
-                if available {
-                    if let Ok(evt) = event::read() {
-                        if tx.send(evt).is_err() {
-                            break; // Receiver dropped, stop thread
-                        }
-                    } else {
-                        break;
-                    }
-                } else if tx.is_closed() {
-                    // Timeout, check if we should exit
-                    break;
-                }
-            }
-        });
-
         for (i, event) in events.iter().enumerate() {
             // Calculate delay based on speed
             let delay = if i > 0 {
@@ -78,50 +55,33 @@ impl ReplayEngine {
 
             if delay > 0 {
                 let start = Instant::now();
-                let deadline = start + Duration::from_millis(delay);
-
-                loop {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        break;
-                    }
-
+                while start.elapsed().as_millis() < delay as u128 {
                     // Handle interactive input during delay
-                    let mut input_event = None;
-
+                    if event::poll(Duration::from_millis(50))? {
+                        if let CEvent::Key(key) = event::read()? {
+                            match key.code {
+                                KeyCode::Char(' ') => {
+                                    paused = !paused;
+                                }
+                                KeyCode::Char('+') => {
+                                    current_speed *= 2.0;
+                                }
+                                KeyCode::Char('-') => {
+                                    current_speed = (current_speed / 2.0).max(0.25);
+                                }
+                                KeyCode::Char('q') => {
+                                    println!("\n⏹️  Quit replay");
+                                    return Ok(());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     if paused {
-                        // If paused, we wait for input or a small timeout to emulate original behavior
-                        // Original behavior: sleep 50ms, then check loop condition (which might exit if delay passed)
-                        tokio::select! {
-                            evt = rx.recv() => input_event = evt,
-                            _ = sleep(Duration::from_millis(50)) => {}
-                        }
-                    } else {
-                        // Wait for deadline or input
-                        tokio::select! {
-                            evt = rx.recv() => input_event = evt,
-                            _ = sleep_until(deadline) => {}
-                        }
+                        sleep(Duration::from_millis(50)).await;
+                        continue;
                     }
-
-                    if let Some(CEvent::Key(key)) = input_event {
-                        match key.code {
-                            KeyCode::Char(' ') => {
-                                paused = !paused;
-                            }
-                            KeyCode::Char('+') => {
-                                current_speed *= 2.0;
-                            }
-                            KeyCode::Char('-') => {
-                                current_speed = (current_speed / 2.0).max(0.25);
-                            }
-                            KeyCode::Char('q') => {
-                                println!("\n⏹️  Quit replay");
-                                return Ok(());
-                            }
-                            _ => {}
-                        }
-                    }
+                    sleep(Duration::from_millis(10)).await;
                 }
             }
 

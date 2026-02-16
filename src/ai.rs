@@ -133,7 +133,7 @@ pub async fn send_chat_request(model: &str, system_prompt: &str, user_prompt: &s
     Ok(content)
 }
 
-pub async fn summarize_session(session_id: &str, model: &str) -> crate::Result<String> {
+pub async fn summarize_session(session_id: &str, model: &str, api_key_opt: Option<String>) -> crate::Result<String> {
     let storage = Storage::new()?;
     let timeline = build_timeline(&storage, session_id, 200)?;
     let prompt = format!("You are an expert assistant. Summarize the following terminal session succinctly with key actions, commands run, files changed, and possible next steps.\n\n{}", timeline);
@@ -142,6 +142,6 @@ pub async fn summarize_session(session_id: &str, model: &str) -> crate::Result<S
         model,
         "You are a concise expert assistant for terminal session summaries.",
         &prompt,
-        None
+        api_key_opt
     ).await
 }
