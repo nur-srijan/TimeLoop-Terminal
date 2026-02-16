@@ -365,7 +365,7 @@ impl Storage {
             let events_path = Self::events_log_for(&pb, format);
             storage.events_log_path = Some(events_path);
             storage.append_only = true;
-            let _ = storage.load_events_from_log();
+            self.append_event_to_log(&event)?;
         }
         Ok(storage)
     }
