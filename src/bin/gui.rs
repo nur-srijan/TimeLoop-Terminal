@@ -2,9 +2,14 @@
 
 use eframe::egui;
 use timeloop_terminal::{Event, EventType, ReplayEngine, SessionManager};
+use std::sync::mpsc::{Receiver, Sender};
 
 // Enhanced GUI app with comprehensive features
 struct TimeLoopGui {
+    // AI communication
+    ai_sender: Sender<Result<String, String>>,
+    ai_receiver: Receiver<Result<String, String>>,
+
     // Session management
     sessions: Vec<timeloop_terminal::session::Session>,
     selected: Option<String>,
@@ -44,6 +49,7 @@ struct TimeLoopGui {
 
 impl Default for TimeLoopGui {
     fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut sessions = Vec::new();
         if let Ok(sm) = SessionManager::new() {
             if let Ok(list) = sm.list_sessions() {
@@ -57,6 +63,8 @@ impl Default for TimeLoopGui {
         api_keys.insert("local".to_string(), String::new());
         
         Self {
+            ai_sender: tx,
+            ai_receiver: rx,
             sessions,
             selected: None,
             replay_summary: None,
@@ -85,6 +93,22 @@ impl Default for TimeLoopGui {
 
 impl eframe::App for TimeLoopGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Check for AI results
+        if let Ok(result) = self.ai_receiver.try_recv() {
+            self.ai_analyzing = false;
+            match result {
+                Ok(response) => {
+                    self.ai_response = response;
+                    self.success_message = Some("AI analysis complete".to_string());
+                }
+                Err(e) => {
+                    self.ai_response = format!("Error: {}", e);
+                    self.error_message = Some(format!("AI analysis failed: {}", e));
+                }
+            }
+            ctx.request_repaint();
+        }
+
         // Clear messages after a delay
         if self.error_message.is_some() || self.success_message.is_some() {
             ctx.request_repaint();
@@ -386,7 +410,47 @@ impl TimeLoopGui {
     fn analyze_session(&mut self) {
         if let Some(ref session_id) = self.selected {
             self.success_message = Some(format!("Analyzing session: {}", session_id));
-            // TODO: Implement actual analysis
+            self.ai_analyzing = true;
+            self.show_ai_panel = true;
+            self.ai_response = "Analyzing session... please wait.".to_string();
+
+            let session_id = session_id.clone();
+            let model = self.ai_model.clone();
+            let api_key = self.api_keys.get("openai").cloned().or_else(|| self.api_keys.get("anthropic").cloned());
+            let tx = self.ai_sender.clone();
+
+            std::thread::spawn(move || {
+                let rt_result = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+
+                match rt_result {
+                    Ok(rt) => {
+                        let res = rt.block_on(async {
+                            #[cfg(feature = "ai")]
+                            {
+                                timeloop_terminal::ai::summarize_session(&session_id, &model, api_key).await
+                            }
+                            #[cfg(not(feature = "ai"))]
+                            {
+                                Err(timeloop_terminal::TimeLoopError::Configuration(format!(
+                                    "AI feature not enabled. Cannot analyze session '{}' with model '{}'. Please run with --features ai",
+                                    session_id, model
+                                )))
+                            }
+                        });
+
+                        let msg = match res {
+                            Ok(summary) => Ok(summary),
+                            Err(e) => Err(e.to_string()),
+                        };
+                        let _ = tx.send(msg);
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("Failed to create runtime: {}", e)));
+                    }
+                }
+            });
         } else {
             self.error_message = Some("No session selected for analysis".to_string());
         }
