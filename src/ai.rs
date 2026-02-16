@@ -69,14 +69,19 @@ fn build_timeline(storage: &Storage, session_id: &str, max_items: usize) -> crat
     Ok(lines.join("\n"))
 }
 
-pub async fn summarize_session(session_id: &str, model: &str) -> crate::Result<String> {
+pub async fn summarize_session(session_id: &str, model: &str, api_key: Option<String>) -> crate::Result<String> {
     let storage = Storage::new()?;
     let timeline = build_timeline(&storage, session_id, 200)?;
     let prompt = format!("You are an expert assistant. Summarize the following terminal session succinctly with key actions, commands run, files changed, and possible next steps.\n\n{}", timeline);
 
-    let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
-        crate::error::TimeLoopError::Configuration("Missing OPENROUTER_API_KEY".to_string())
-    })?;
+    let api_key = if let Some(key) = api_key {
+        key
+    } else {
+        std::env::var("OPENROUTER_API_KEY").map_err(|_| {
+            crate::error::TimeLoopError::Configuration("Missing API Key. Please provide it in settings or set OPENROUTER_API_KEY env var.".to_string())
+        })?
+    };
+
     let base = std::env::var("OPENROUTER_BASE_URL")
         .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
 
