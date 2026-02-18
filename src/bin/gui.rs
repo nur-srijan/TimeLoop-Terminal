@@ -102,26 +102,39 @@ impl Default for TimeLoopGui {
 
 impl eframe::App for TimeLoopGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Poll for AI response
-                let mut response_received = None;
+        // Poll for AI response: prefer per-request receiver, otherwise fall back to global `ai_receiver`.
+        let mut response_received: Option<Result<String, String>> = None;
         if let Some(ref rx) = self.ai_response_receiver {
             match rx.try_recv() {
                 Ok(result) => {
-                    response_received = Some(result);
+                    let msg = match result {
+                        Ok(s) => Ok(s),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    response_received = Some(msg);
                 }
                 Err(mpsc::TryRecvError::Empty) => {
-                    // Still waiting
-                    ctx.request_repaint(); // Keep repainting to show animation/status if needed
+                    ctx.request_repaint();
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    response_received = Some(Err(timeloop_terminal::error::TimeLoopError::Unknown("AI request channel disconnected unexpectedly".to_string())));
+                    response_received = Some(Err("AI request channel disconnected unexpectedly".to_string()));
+                }
+            }
+        } else {
+            match self.ai_receiver.try_recv() {
+                Ok(result) => response_received = Some(result),
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    response_received = Some(Err("AI request channel disconnected unexpectedly".to_string()));
                 }
             }
         }
 
         if let Some(result) = response_received {
             self.ai_analyzing = false;
-            self.ai_response_receiver = None; // clear receiver
+            self.ai_response_receiver = None; // clear per-request receiver if any
             match result {
                 Ok(response) => {
                     self.ai_response = response;
@@ -479,23 +492,32 @@ impl TimeLoopGui {
         }
 
         self.ai_analyzing = true;
-        self.ai_response = "Analyzing your request...".to_string();
+        self.ai_response = "Thinking...".to_string();
         
         let prompt = self.ai_prompt.clone();
         let model = self.ai_model.clone();
         let api_key = self.api_keys.get("openai").cloned().filter(|s| !s.is_empty());
-        let (tx, rx) = mpsc::channel();
-        self.ai_response_receiver = Some(rx);
-
         let tx = self.ai_sender.clone();
 
         TOKIO_RUNTIME.spawn(async move {
-            let result = timeloop_terminal::ai::send_chat_request(
-                &model,
-                "You are a helpful assistant.",
-                &prompt,
-                api_key
-            ).await;
+            let result = {
+                #[cfg(feature = "ai")]
+                {
+                    timeloop_terminal::ai::send_chat_request(
+                        &model,
+                        "You are a helpful assistant.",
+                        &prompt,
+                        api_key,
+                    ).await
+                }
+                #[cfg(not(feature = "ai"))]
+                {
+                    Err(timeloop_terminal::TimeLoopError::Configuration(format!(
+                        "AI feature not enabled. Cannot send chat request with model '{}'. Please run with --features ai",
+                        model
+                    )))
+                }
+            };
 
             let msg = match result {
                 Ok(response) => Ok(response),
