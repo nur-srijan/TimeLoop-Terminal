@@ -45,6 +45,7 @@ struct TimeLoopGui {
     ai_prompt: String,
     ai_response: String,
     ai_analyzing: bool,
+    ai_response_receiver: Option<mpsc::Receiver<timeloop_terminal::Result<String>>>,
     
     // Import/Export
     import_path: String,
@@ -90,6 +91,7 @@ impl Default for TimeLoopGui {
             ai_prompt: String::new(),
             ai_response: String::new(),
             ai_analyzing: false,
+            ai_response_receiver: None,
             import_path: String::new(),
             export_path: String::new(),
             error_message: None,
@@ -102,7 +104,7 @@ impl eframe::App for TimeLoopGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Poll for AI response
                 let mut response_received = None;
-        if let Some(ref rx) = self.ai_receiver {
+        if let Some(ref rx) = self.ai_response_receiver {
             match rx.try_recv() {
                 Ok(result) => {
                     response_received = Some(result);
@@ -119,7 +121,7 @@ impl eframe::App for TimeLoopGui {
 
         if let Some(result) = response_received {
             self.ai_analyzing = false;
-            self.ai_receiver = None; // clear receiver
+            self.ai_response_receiver = None; // clear receiver
             match result {
                 Ok(response) => {
                     self.ai_response = response;
@@ -482,6 +484,8 @@ impl TimeLoopGui {
         let prompt = self.ai_prompt.clone();
         let model = self.ai_model.clone();
         let api_key = self.api_keys.get("openai").cloned().filter(|s| !s.is_empty());
+        let (tx, rx) = mpsc::channel();
+        self.ai_response_receiver = Some(rx);
 
         let tx = self.ai_sender.clone();
 
