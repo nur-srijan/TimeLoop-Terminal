@@ -101,16 +101,34 @@ impl Default for TimeLoopGui {
 impl eframe::App for TimeLoopGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Poll for AI response
-        while let Ok(result) = self.ai_receiver.try_recv() {
+                let mut response_received = None;
+        if let Some(ref rx) = self.ai_receiver {
+            match rx.try_recv() {
+                Ok(result) => {
+                    response_received = Some(result);
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Still waiting
+                    ctx.request_repaint(); // Keep repainting to show animation/status if needed
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    response_received = Some(Err(timeloop_terminal::error::TimeLoopError::Unknown("AI request channel disconnected unexpectedly".to_string())));
+                }
+            }
+        }
+
+        if let Some(result) = response_received {
             self.ai_analyzing = false;
+            self.ai_receiver = None; // clear receiver
             match result {
                 Ok(response) => {
                     self.ai_response = response;
                     self.success_message = Some("AI response received".to_string());
                 }
                 Err(e) => {
-                    self.ai_response = format!("Error: {}", e);
-                    self.error_message = Some(format!("AI request failed: {}", e));
+                    let msg = e.to_string();
+                    self.ai_response = format!("Error: {}", msg);
+                    self.error_message = Some(format!("AI request failed: {}", msg));
                 }
             }
             ctx.request_repaint();
