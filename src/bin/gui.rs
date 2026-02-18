@@ -2,7 +2,16 @@
 
 use eframe::egui;
 use timeloop_terminal::{ReplayEngine, SessionManager};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
+use once_cell::sync::Lazy;
+use tokio::runtime::Runtime;
+
+static TOKIO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create Tokio runtime")
+});
 
 // Enhanced GUI app with comprehensive features
 struct TimeLoopGui {
@@ -36,6 +45,7 @@ struct TimeLoopGui {
     ai_prompt: String,
     ai_response: String,
     ai_analyzing: bool,
+    ai_response_receiver: Option<mpsc::Receiver<timeloop_terminal::Result<String>>>,
     
     // Import/Export
     import_path: String,
@@ -81,6 +91,7 @@ impl Default for TimeLoopGui {
             ai_prompt: String::new(),
             ai_response: String::new(),
             ai_analyzing: false,
+            ai_response_receiver: None,
             import_path: String::new(),
             export_path: String::new(),
             error_message: None,
@@ -91,17 +102,48 @@ impl Default for TimeLoopGui {
 
 impl eframe::App for TimeLoopGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Check for AI results
-        if let Ok(result) = self.ai_receiver.try_recv() {
+        // Poll for AI response: prefer per-request receiver, otherwise fall back to global `ai_receiver`.
+        let mut response_received: Option<Result<String, String>> = None;
+        if let Some(ref rx) = self.ai_response_receiver {
+            match rx.try_recv() {
+                Ok(result) => {
+                    let msg = match result {
+                        Ok(s) => Ok(s),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    response_received = Some(msg);
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    response_received = Some(Err("AI request channel disconnected unexpectedly".to_string()));
+                }
+            }
+        } else {
+            match self.ai_receiver.try_recv() {
+                Ok(result) => response_received = Some(result),
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    response_received = Some(Err("AI request channel disconnected unexpectedly".to_string()));
+                }
+            }
+        }
+
+        if let Some(result) = response_received {
             self.ai_analyzing = false;
+            self.ai_response_receiver = None; // clear per-request receiver if any
             match result {
                 Ok(response) => {
                     self.ai_response = response;
-                    self.success_message = Some("AI analysis complete".to_string());
+                    self.success_message = Some("AI response received".to_string());
                 }
                 Err(e) => {
-                    self.ai_response = format!("Error: {}", e);
-                    self.error_message = Some(format!("AI analysis failed: {}", e));
+                    let msg = e.to_string();
+                    self.ai_response = format!("Error: {}", msg);
+                    self.error_message = Some(format!("AI request failed: {}", msg));
                 }
             }
             ctx.request_repaint();
@@ -408,37 +450,26 @@ impl TimeLoopGui {
             let api_key = self.api_keys.get("openai").cloned().or_else(|| self.api_keys.get("anthropic").cloned());
             let tx = self.ai_sender.clone();
 
-            std::thread::spawn(move || {
-                let rt_result = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build();
-
-                match rt_result {
-                    Ok(rt) => {
-                        let res = rt.block_on(async {
-                            #[cfg(feature = "ai")]
-                            {
-                                timeloop_terminal::ai::summarize_session(&session_id, &model, api_key).await
-                            }
-                            #[cfg(not(feature = "ai"))]
-                            {
-                                Err(timeloop_terminal::TimeLoopError::Configuration(format!(
-                                    "AI feature not enabled. Cannot analyze session '{}' with model '{}'. Please run with --features ai",
-                                    session_id, model
-                                )))
-                            }
-                        });
-
-                        let msg = match res {
-                            Ok(summary) => Ok(summary),
-                            Err(e) => Err(e.to_string()),
-                        };
-                        let _ = tx.send(msg);
+            TOKIO_RUNTIME.spawn(async move {
+                let res = {
+                    #[cfg(feature = "ai")]
+                    {
+                        timeloop_terminal::ai::summarize_session(&session_id, &model, api_key).await
                     }
-                    Err(e) => {
-                        let _ = tx.send(Err(format!("Failed to create runtime: {}", e)));
+                    #[cfg(not(feature = "ai"))]
+                    {
+                        Err(timeloop_terminal::TimeLoopError::Configuration(format!(
+                            "AI feature not enabled. Cannot analyze session '{}' with model '{}'. Please run with --features ai",
+                            session_id, model
+                        )))
                     }
-                }
+                };
+
+                let msg = match res {
+                    Ok(summary) => Ok(summary),
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = tx.send(msg);
             });
         } else {
             self.error_message = Some("No session selected for analysis".to_string());
@@ -461,12 +492,39 @@ impl TimeLoopGui {
         }
 
         self.ai_analyzing = true;
-        self.ai_response = "Analyzing your request...".to_string();
+        self.ai_response = "Thinking...".to_string();
         
-        // TODO: Implement actual AI request
-        // For now, simulate a response
-        self.ai_response = format!("AI Response to: '{}'\n\nThis is a simulated response. In a real implementation, this would call the selected AI model with your prompt and the current session context.", self.ai_prompt);
-        self.ai_analyzing = false;
+        let prompt = self.ai_prompt.clone();
+        let model = self.ai_model.clone();
+        let api_key = self.api_keys.get("openai").cloned().filter(|s| !s.is_empty());
+        let tx = self.ai_sender.clone();
+
+        TOKIO_RUNTIME.spawn(async move {
+            let result = {
+                #[cfg(feature = "ai")]
+                {
+                    timeloop_terminal::ai::send_chat_request(
+                        &model,
+                        "You are a helpful assistant.",
+                        &prompt,
+                        api_key,
+                    ).await
+                }
+                #[cfg(not(feature = "ai"))]
+                {
+                    Err(timeloop_terminal::TimeLoopError::Configuration(format!(
+                        "AI feature not enabled. Cannot send chat request with model '{}'. Please run with --features ai",
+                        model
+                    )))
+                }
+            };
+
+            let msg = match result {
+                Ok(response) => Ok(response),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(msg);
+        });
     }
 
     fn show_about(&mut self) {
