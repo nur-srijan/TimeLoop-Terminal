@@ -42,7 +42,7 @@ jobs:
         run: |
           mkdir -p artifacts
           BIN_NAME=timeloop-terminal
-          if [ "${{ runner.os }}" = "Windows" ]; then
+          if ( "${{ runner.os }}" = "Windows" ); then
             cp target/release/${BIN_NAME}.exe artifacts/${BIN_NAME}-${{ matrix.os }}.exe || true
           else
             cp target/release/${BIN_NAME} artifacts/${BIN_NAME}-${{ matrix.os }} || true
