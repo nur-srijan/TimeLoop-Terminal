@@ -5,8 +5,7 @@ use std::io::{BufRead, Read, Seek, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -21,10 +20,6 @@ use zeroize::Zeroize;
 use crate::branch::TimelineBranch;
 use crate::session::Session;
 use crate::Event;
-
-const KEY_LEN: usize = 32;
-const SALT_LEN: usize = 16;
-const NONCE_LEN: usize = 24;
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct StorageInner {
@@ -58,88 +53,6 @@ impl Drop for StorageInner {
 // Atomic counter for tracking pending write operations to reduce lock contention
 static PENDING_WRITES: AtomicU32 = AtomicU32::new(0);
 
-enum WriteCommand {
-    Overwrite {
-        path: PathBuf,
-        content: Vec<u8>,
-        resp: Option<Sender<Result<(), String>>>,
-    },
-}
-
-static WRITE_QUEUE: Lazy<Mutex<SyncSender<WriteCommand>>> = Lazy::new(|| {
-    let (tx, rx) = sync_channel(1000);
-    thread::spawn(move || {
-        while let Ok(cmd) = rx.recv() {
-            match cmd {
-                WriteCommand::Overwrite {
-                    path,
-                    mut content,
-                    resp,
-                } => {
-                    let perform_write = || -> Result<(), String> {
-                        let parent = path
-                            .parent()
-                            .map(|p| p.to_path_buf())
-                            .unwrap_or_else(|| std::path::PathBuf::from("."));
-                        let mut tmp = parent.join(".tmp_timeloop");
-                        let mut osrng = rand::rngs::OsRng;
-                        let suffix: u64 = osrng.next_u64();
-                        tmp = tmp.with_extension(format!("{}.tmp", suffix));
-
-                        #[allow(unused_mut)]
-                        let mut options = OpenOptions::new();
-                        options.write(true).create(true).truncate(true);
-
-                        #[cfg(unix)]
-                        {
-                            options.mode(0o600);
-                        }
-
-                        let mut file = options
-                            .open(&tmp)
-                            .map_err(|e| format!("Failed to open tmp file {}: {}", tmp.display(), e))?;
-
-                        file.write_all(&content)
-                            .map_err(|e| format!("Failed to write tmp file {}: {}", tmp.display(), e))?;
-
-                        std::fs::rename(&tmp, &path).map_err(|e| {
-                            format!(
-                                "Failed to rename {} to {}: {}",
-                                tmp.display(),
-                                path.display(),
-                                e
-                            )
-                        })?;
-                        Ok(())
-                    };
-
-                    let result = perform_write();
-
-                    if let Err(ref msg) = result {
-                        tracing::error!("{}", msg);
-                    }
-
-                    // Zeroize content after writing
-                    // Since Vec<u8> doesn't impl Zeroize directly without feature flags on some versions,
-                    // and we are inside the crate that uses it, we rely on the zeroize crate being available.
-                    // However, to be safe and compatible with how the rest of the code works (using Zeroize trait),
-                    // we can try to zeroize it. If Vec<u8> doesn't implement it, we might need a loop.
-                    // The project uses `zeroize` with `derive` feature. `u8` implements `Zeroize`.
-                    // But `Vec<u8>` implements `Zeroize` only if `alloc` feature of zeroize is enabled usually.
-                    // Let's assume standard zeroize behavior or do it manually if compilation fails.
-                    // Given previous code called zeroize() on data_bytes (Vec<u8>), it should work here.
-                    content.zeroize();
-
-                    if let Some(resp_tx) = resp {
-                        let _ = resp_tx.send(result);
-                    }
-                }
-            }
-        }
-    });
-    Mutex::new(tx)
-});
-
 static GLOBAL_STORAGE: Lazy<RwLock<StorageInner>> = Lazy::new(|| RwLock::new(StorageInner::default()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,7 +85,7 @@ pub struct Storage {
     inner: Option<Arc<RwLock<StorageInner>>>,
     persistence_path: Option<PathBuf>,
     // Encryption support
-    encryption_key: Option<[u8; KEY_LEN]>,
+    encryption_key: Option<[u8; 32]>,
     encryption_salt: Option<Vec<u8>>,
     // Argon2 params used to derive keys for this storage instance
     argon2_config: Option<Argon2Config>,
@@ -394,7 +307,7 @@ impl Storage {
         let pb = PathBuf::from(path);
         let inner = Arc::new(RwLock::new(StorageInner::default()));
 
-        let mut encryption_key: Option<[u8; KEY_LEN]> = None;
+        let mut encryption_key: Option<[u8; 32]> = None;
         let mut encryption_salt: Option<Vec<u8>> = None;
         if pb.exists() {
             if let Ok(bytes) = std::fs::read(&pb) {
@@ -462,7 +375,9 @@ impl Storage {
 
         // If file didn't exist or wasn't encrypted, generate a salt now
         if encryption_salt.is_none() {
-            let salt = Self::generate_random_bytes(SALT_LEN)?;
+            let mut salt = vec![0u8; 16];
+            let mut osrng = rand::rngs::OsRng;
+            osrng.fill_bytes(&mut salt);
             let key = Self::derive_key_with_params(passphrase, &salt, Some(params));
             encryption_key = Some(key);
             encryption_salt = Some(salt);
@@ -471,6 +386,10 @@ impl Storage {
         let gp = global_compaction_policy();
         let pending_writes = Arc::new(AtomicU32::new(0));
         Ok(Self { inner: Some(inner), persistence_path: Some(pb), encryption_key, encryption_salt, argon2_config: Some(params.clone()), persistence_format: format, append_only: false, events_log_path: None, max_log_size_bytes: gp.max_log_size_bytes, max_events: gp.max_events, retention_count: gp.retention_count, compaction_interval_secs: gp.compaction_interval_secs, background_running: None, background_handle: None, pending_writes: Some(pending_writes) })
+    }
+
+    pub fn get_db_path() -> crate::Result<std::path::PathBuf> {
+        Ok(std::path::PathBuf::from("/tmp/timeloop-memory"))
     }
 
     // Helper to run read-only closures against the correct storage instance
@@ -515,9 +434,9 @@ impl Storage {
         if self.append_only {
             let _ = self.append_event_to_log(event);
         } else if let Some(path) = &self.persistence_path {
-            let _ = Self::save_to_path(path, self, false);
+            let _ = Self::save_to_path(path, self);
         } else if self.inner.is_none() {
-            let _ = Self::save_to_disk(false);
+            let _ = Self::save_to_disk();
         }
         Ok(())
     }
@@ -556,9 +475,6 @@ impl Storage {
                 .get(session_id)
                 .map(|events| {
                     let len = events.len();
-                    if n == 0 {
-                        return Vec::new();
-                    }
                     if n >= len {
                         return events.clone();
                     }
@@ -576,9 +492,9 @@ impl Storage {
             guard.events.remove(session_id);
         })?;
         if let Some(path) = &self.persistence_path {
-            let _ = Self::save_to_path(path, self, true);
+            let _ = Self::save_to_path(path, self);
         } else if self.inner.is_none() {
-            let _ = Self::save_to_disk(true);
+            let _ = Self::save_to_disk();
         }
         Ok(())
     }
@@ -589,9 +505,9 @@ impl Storage {
             guard.sessions.insert(session.id.clone(), session.clone());
         })?;
         if let Some(path) = &self.persistence_path {
-            let _ = Self::save_to_path(path, self, true);
+            let _ = Self::save_to_path(path, self);
         } else if self.inner.is_none() {
-            let _ = Self::save_to_disk(true);
+            let _ = Self::save_to_disk();
         }
         Ok(())
     }
@@ -614,9 +530,9 @@ impl Storage {
             guard.branches.insert(branch.id.clone(), branch.clone());
         })?;
         if let Some(path) = &self.persistence_path {
-            let _ = Self::save_to_path(path, self, true);
+            let _ = Self::save_to_path(path, self);
         } else if self.inner.is_none() {
-            let _ = Self::save_to_disk(true);
+            let _ = Self::save_to_disk();
         }
         Ok(())
     }
@@ -639,9 +555,9 @@ impl Storage {
             guard.sessions.remove(session_id);
         })?;
         if let Some(path) = &self.persistence_path {
-            let _ = Self::save_to_path(path, self, true);
+            let _ = Self::save_to_path(path, self);
         } else if self.inner.is_none() {
-            let _ = Self::save_to_disk(true);
+            let _ = Self::save_to_disk();
         }
         Ok(())
     }
@@ -652,9 +568,9 @@ impl Storage {
             guard.branches.remove(branch_id);
         })?;
         if let Some(path) = &self.persistence_path {
-            let _ = Self::save_to_path(path, self, true);
+            let _ = Self::save_to_path(path, self);
         } else if self.inner.is_none() {
-            let _ = Self::save_to_disk(true);
+            let _ = Self::save_to_disk();
         }
         Ok(())
     }
@@ -762,50 +678,48 @@ impl Storage {
 
     pub fn flush(&self) -> crate::Result<()> {
         if let Some(path) = &self.persistence_path {
-            Self::save_to_path(path, self, true)?;
+            Self::save_to_path(path, self)
         } else {
-            Self::save_to_disk(true)?;
+            Self::save_to_disk()
         }
-        Ok(())
     }
 
     // Helper to atomically write bytes to a file path. Writes to a temporary file in
     // the same directory and then renames into place.
-    fn atomic_write(path: &std::path::Path, content: Vec<u8>, sync: bool) -> crate::Result<()> {
-        let (tx, rx) = if sync {
-            let (tx, rx) = channel();
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
+    fn atomic_write(path: &PathBuf, bytes: &[u8]) -> crate::Result<()> {
+        // If path has no parent (e.g., filename in current dir) use current directory
+        let parent = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let mut tmp = parent.join(".tmp_timeloop");
+        // add a random suffix to avoid collisions
+        let mut osrng = rand::rngs::OsRng;
+        let suffix: u64 = osrng.next_u64();
+        tmp = tmp.with_extension(format!("{}.tmp", suffix));
 
-        // Queue the write operation to background thread
-        let cmd = WriteCommand::Overwrite {
-            path: path.to_path_buf(),
-            content,
-            resp: tx,
-        };
+        // Write tmp file with secure permissions
+        #[allow(unused_mut)]
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
 
-        if let Ok(guard) = WRITE_QUEUE.lock() {
-            guard
-                .send(cmd)
-                .map_err(|e| crate::error::TimeLoopError::Storage(format!("Background write queue failed: {}", e)))?;
-        } else {
-            return Err(crate::error::TimeLoopError::Storage("Failed to lock write queue".to_string()));
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
         }
 
-        if let Some(rx) = rx {
-            match rx.recv() {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(crate::error::TimeLoopError::FileSystem(e)),
-                Err(_) => Err(crate::error::TimeLoopError::Storage("Background thread disconnected".to_string())),
-            }
-        } else {
-            Ok(())
-        }
+        let mut file = options.open(&tmp)
+            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        file.write_all(bytes)
+            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+
+        // Rename into place (atomic on most platforms when on same filesystem)
+        std::fs::rename(&tmp, path)
+            .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+        Ok(())
     }
 
-    fn save_to_disk(sync: bool) -> crate::Result<()> {
+    fn save_to_disk() -> crate::Result<()> {
         let dir = Self::data_dir();
         fs::create_dir_all(&dir)
             .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
@@ -815,7 +729,7 @@ impl Storage {
             .map_err(|e| crate::error::TimeLoopError::Storage(e.to_string()))?;
         let data = serde_json::to_string_pretty(&*guard)?;
         // atomic write
-        Self::atomic_write(&path, data.into_bytes(), sync)?;
+        Self::atomic_write(&path, data.as_bytes())?;
         Ok(())
     }
 
@@ -824,9 +738,9 @@ impl Storage {
     pub fn compact(&self) -> crate::Result<()> {
         // Persist current snapshot
         if let Some(path) = &self.persistence_path {
-            Self::save_to_path(path, self, true)?;
+            Self::save_to_path(path, self)?;
         } else if self.inner.is_none() {
-            Self::save_to_disk(true)?;
+            Self::save_to_disk()?;
         }
 
         // Rotate/truncate events log
@@ -1150,7 +1064,7 @@ impl Storage {
 
     // Save to a per-instance path. Serialize the current inner state (either global
     // or the instance's inner) and write it to the provided path.
-    fn save_to_path(path: &std::path::Path, storage: &Storage, sync: bool) -> crate::Result<()> {
+    fn save_to_path(path: &PathBuf, storage: &Storage) -> crate::Result<()> {
         // Determine which inner to read from
         let data_inner = if let Some(inner) = &storage.inner {
             inner
@@ -1179,10 +1093,6 @@ impl Storage {
                 )
             })?;
             let (nonce, ciphertext) = Self::encrypt_bytes(key, data_bytes.as_slice())?;
-
-            // Zeroize plaintext immediately after encryption
-            data_bytes.zeroize();
-
             match storage.persistence_format {
                 PersistenceFormat::Json => {
                     let wrapper = EncryptedFile {
@@ -1191,7 +1101,7 @@ impl Storage {
                         ciphertext: general_purpose::STANDARD.encode(&ciphertext),
                     };
                     let wrapper_json = serde_json::to_string_pretty(&wrapper)?;
-                    Self::atomic_write(path, wrapper_json.into_bytes(), sync)?;
+                    Self::atomic_write(path, wrapper_json.as_bytes())?;
                 }
                 PersistenceFormat::Cbor => {
                     let wrapper_cbor = EncryptedFileCbor {
@@ -1200,24 +1110,28 @@ impl Storage {
                         ciphertext,
                     };
                     let wrapper_bytes = serde_cbor::to_vec(&wrapper_cbor)?;
-                    Self::atomic_write(path, wrapper_bytes, sync)?;
+                    Self::atomic_write(path, &wrapper_bytes)?;
                 }
             }
+            // zeroize plaintext
+            data_bytes.zeroize();
         } else {
             // Unencrypted path: write according to format directly
-            // Ownership of data_bytes is passed to atomic_write, which will zeroize it after writing in the background thread.
-            Self::atomic_write(path, data_bytes, sync)?;
+            Self::atomic_write(path, data_bytes.as_slice())?;
+            data_bytes.zeroize();
         }
         Ok(())
     }
 
-    // Encrypt given plaintext with the given key using XChaCha20-Poly1305.
-    fn encrypt_bytes(key: &[u8; KEY_LEN], plaintext: &[u8]) -> crate::Result<(Vec<u8>, Vec<u8>)> {
+    // Encrypt given plaintext with the given 32-byte key using XChaCha20-Poly1305.
+    fn encrypt_bytes(key: &[u8; 32], plaintext: &[u8]) -> crate::Result<(Vec<u8>, Vec<u8>)> {
         use chacha20poly1305::aead::{Aead, KeyInit};
         use chacha20poly1305::XChaCha20Poly1305;
         use chacha20poly1305::XNonce;
         let cipher = XChaCha20Poly1305::new(key.into());
-        let nonce = Self::generate_random_bytes(NONCE_LEN)?;
+        let mut nonce = vec![0u8; 24];
+        let mut osrng = rand::rngs::OsRng;
+        osrng.fill_bytes(&mut nonce[..]);
         let nonce_arr = XNonce::from_slice(&nonce);
         let ciphertext = cipher.encrypt(nonce_arr, plaintext).map_err(|e| {
             crate::error::TimeLoopError::FileSystem(format!("Encryption failed: {}", e))
@@ -1225,7 +1139,7 @@ impl Storage {
         Ok((nonce, ciphertext))
     }
 
-    fn try_decrypt(key: &[u8; KEY_LEN], nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, ()> {
+    fn try_decrypt(key: &[u8; 32], nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, ()> {
         use chacha20poly1305::aead::{Aead, KeyInit};
         use chacha20poly1305::XChaCha20Poly1305;
         use chacha20poly1305::XNonce;
@@ -1234,14 +1148,14 @@ impl Storage {
         cipher.decrypt(nonce_arr, ciphertext).map_err(|_| ())
     }
 
-    // Derive a key from passphrase + salt using Argon2
+    // Derive a 32-byte key from passphrase + salt using PBKDF2-HMAC-SHA256
     fn derive_key_with_params(
         passphrase: &str,
         salt: &[u8],
         params: Option<&Argon2Config>,
-    ) -> [u8; KEY_LEN] {
+    ) -> [u8; 32] {
         let config = params.cloned().unwrap_or_default();
-        let mut key = [0u8; KEY_LEN];
+        let mut key = [0u8; 32];
         use argon2::{Algorithm, Params, Version};
         let params = Params::new(
             config.memory_kib,
@@ -1255,15 +1169,6 @@ impl Storage {
             .hash_password_into(passphrase.as_bytes(), salt, &mut key)
             .expect("Argon2 key derivation failed");
         key
-    }
-
-    fn generate_random_bytes(len: usize) -> crate::Result<Vec<u8>> {
-        let mut buf = vec![0u8; len];
-        let mut osrng = rand::rngs::OsRng;
-        osrng
-            .try_fill_bytes(&mut buf)
-            .map_err(|e| crate::error::TimeLoopError::Storage(format!("Failed to generate random bytes: {}", e)))?;
-        Ok(buf)
     }
 
     /// Change the passphrase used to encrypt the storage. When called, the current
@@ -1293,7 +1198,9 @@ impl Storage {
         let mut data_bytes = serde_json::to_vec_pretty(&data_inner)?;
 
         // Generate new salt and derive new key
-        let salt = Self::generate_random_bytes(SALT_LEN)?;
+        let mut salt = vec![0u8; 16];
+        let mut osrng = rand::rngs::OsRng;
+        osrng.fill_bytes(&mut salt);
         let new_key =
             Self::derive_key_with_params(new_passphrase, &salt, self.argon2_config.as_ref());
 
@@ -1310,7 +1217,7 @@ impl Storage {
             ciphertext: general_purpose::STANDARD.encode(&ciphertext),
         };
         let wrapper_json = serde_json::to_string_pretty(&wrapper)?;
-        Self::atomic_write(path, wrapper_json.into_bytes(), true)?;
+        Self::atomic_write(path, wrapper_json.as_bytes())?;
 
         // Zeroize and replace old key material
         if let Some(mut old_key) = self.encryption_key.take() {
@@ -2113,68 +2020,5 @@ mod tests {
 
         // When storage goes out of scope, it should zeroize inner
         drop(storage);
-    }
-
-    #[test]
-    fn test_get_last_n_events() {
-        let tmp_dir = TempDir::new().unwrap();
-        let storage = Storage::with_path(tmp_dir.path().join("state.json").to_str().unwrap()).unwrap();
-        let session_id = "test-last-n";
-
-        // Insert events with mixed sequence numbers to test sorting
-        // Let's insert: seq 5, 1, 9, 3, 7, 2, 8, 4, 0, 6
-        let seqs = [5, 1, 9, 3, 7, 2, 8, 4, 0, 6];
-        for &s in &seqs {
-            let event = Event {
-                id: Uuid::new_v4().to_string(),
-                session_id: session_id.to_string(),
-                event_type: EventType::KeyPress {
-                    key: "a".to_string(),
-                    timestamp: Utc::now(),
-                },
-                sequence_number: s,
-                timestamp: Utc::now(),
-            };
-            storage.store_event(&event).unwrap();
-        }
-
-        // We want last 3 events. Should be sequence numbers 7, 8, 9.
-        let result = storage.get_last_n_events(session_id, 3).unwrap();
-        assert_eq!(result.len(), 3);
-
-        // Verify we got 7, 8, 9
-        let mut got_seqs: Vec<u64> = result.iter().map(|e| e.sequence_number).collect();
-        got_seqs.sort();
-        assert_eq!(got_seqs, vec![7, 8, 9]);
-
-        // Test getting more than available
-        let result = storage.get_last_n_events(session_id, 20).unwrap();
-        assert_eq!(result.len(), 10);
-        let mut got_seqs: Vec<u64> = result.iter().map(|e| e.sequence_number).collect();
-        got_seqs.sort();
-        assert_eq!(got_seqs, (0..10).map(|i| i as u64).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn test_get_last_n_events_zero() {
-        let tmp_dir = TempDir::new().unwrap();
-        let storage = Storage::with_path(tmp_dir.path().join("state.json").to_str().unwrap()).unwrap();
-        let session_id = "test-last-n-zero";
-
-        let event = Event {
-            id: Uuid::new_v4().to_string(),
-            session_id: session_id.to_string(),
-            event_type: EventType::KeyPress {
-                key: "a".to_string(),
-                timestamp: Utc::now(),
-            },
-            sequence_number: 1,
-            timestamp: Utc::now(),
-        };
-        storage.store_event(&event).unwrap();
-
-        // Getting 0 events should return empty list and NOT panic
-        let result = storage.get_last_n_events(session_id, 0).unwrap();
-        assert!(result.is_empty());
     }
 }

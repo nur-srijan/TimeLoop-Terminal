@@ -14,15 +14,21 @@ static TOKIO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 });
 
 // Enhanced GUI app with comprehensive features
-struct TimeLoopGui {
-    // AI communication
-    ai_sender: Sender<Result<String, String>>,
-    ai_receiver: Receiver<Result<String, String>>,
+// Timeline visualization constants
+const TIMELINE_HEIGHT: f32 = 60.0;
+const TIMELINE_BG_COLOR: egui::Color32 = egui::Color32::from_rgb(30, 30, 30);
+const COLOR_COMMAND: egui::Color32 = egui::Color32::from_rgb(100, 149, 237); // Cornflower Blue
+const COLOR_FILE_CHANGE: egui::Color32 = egui::Color32::from_rgb(255, 99, 71); // Tomato Red
+const COLOR_TERMINAL: egui::Color32 = egui::Color32::from_rgb(100, 100, 100);
+const COLOR_KEYPRESS: egui::Color32 = egui::Color32::from_rgb(60, 60, 60);
+const COLOR_METADATA: egui::Color32 = egui::Color32::WHITE;
 
+struct TimeLoopGui {
     // Session management
     sessions: Vec<timeloop_terminal::session::Session>,
     selected: Option<String>,
     replay_summary: Option<timeloop_terminal::replay::ReplaySummary>,
+    replay_events: Vec<Event>,
     
     // Replay controls
     playing: bool,
@@ -58,7 +64,6 @@ struct TimeLoopGui {
 
 impl Default for TimeLoopGui {
     fn default() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
         let mut sessions = Vec::new();
         if let Ok(sm) = SessionManager::new() {
             if let Ok(list) = sm.list_sessions() {
@@ -72,11 +77,10 @@ impl Default for TimeLoopGui {
         api_keys.insert("local".to_string(), String::new());
         
         Self {
-            ai_sender: tx,
-            ai_receiver: rx,
             sessions,
             selected: None,
             replay_summary: None,
+            replay_events: Vec::new(),
             playing: false,
             speed: 1.0,
             position_ms: 0,
@@ -394,9 +398,16 @@ impl TimeLoopGui {
         
         // Load replay summary
         if let Ok(engine) = ReplayEngine::new(session_id) {
-            if let Ok(rs) = engine.get_session_summary() {
-                self.replay_summary = Some(rs);
+            if let Ok(events) = engine.get_events() {
+                self.replay_summary = Some(ReplayEngine::calculate_summary(&events));
+                self.replay_events = events;
+            } else {
+                self.replay_events.clear();
+                self.replay_summary = None;
             }
+        } else {
+            self.replay_events.clear();
+            self.replay_summary = None;
         }
     }
 
@@ -600,8 +611,80 @@ impl TimeLoopGui {
             // Timeline visualization
             ui.group(|ui| {
                 ui.heading("📈 Timeline");
-                ui.label("Event timeline visualization would go here");
-                // TODO: Implement actual timeline visualization
+                let (rect, _response) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), TIMELINE_HEIGHT),
+                    egui::Sense::hover(),
+                );
+
+                // Draw timeline background
+                ui.painter().rect_filled(rect, 4.0, TIMELINE_BG_COLOR);
+
+                let total_duration_ms = rs.duration.num_milliseconds() as f64;
+
+                if total_duration_ms > 0.0 {
+                    if let Some(first_event) = self.replay_events.first() {
+                        let start_time = first_event.timestamp;
+
+                        // Draw events
+                        for event in &self.replay_events {
+                            let offset_ms = (event.timestamp - start_time).num_milliseconds() as f64;
+                            let t = (offset_ms / total_duration_ms) as f32;
+                            // Clamp t to [0.0, 1.0] to handle potential slight time skews
+                            let t = t.clamp(0.0, 1.0);
+                            let x = rect.min.x + t * rect.width();
+
+                            let (color, height_fraction, y_offset) = match event.event_type {
+                                EventType::Command { .. } => (COLOR_COMMAND, 0.8, 0.1),
+                                EventType::FileChange { .. } => (COLOR_FILE_CHANGE, 0.8, 0.1),
+                                EventType::TerminalState { .. } => (COLOR_TERMINAL, 0.4, 0.3),
+                                EventType::KeyPress { .. } => (COLOR_KEYPRESS, 0.2, 0.4),
+                                EventType::SessionMetadata { .. } => (COLOR_METADATA, 0.5, 0.25),
+                            };
+
+                            let y_start = rect.min.y + rect.height() * y_offset;
+                            let y_end = y_start + rect.height() * height_fraction;
+
+                            // Use thinner lines for keypresses to avoid clutter
+                            let stroke_width = if matches!(event.event_type, EventType::KeyPress { .. }) {
+                                1.0
+                            } else {
+                                2.0
+                            };
+
+                            ui.painter().line_segment(
+                                [egui::pos2(x, y_start), egui::pos2(x, y_end)],
+                                egui::Stroke::new(stroke_width, color),
+                            );
+                        }
+                    }
+
+                    // Draw playback position indicator
+                    let playback_t = (self.position_ms as f64 / total_duration_ms) as f32;
+                    let playback_t = playback_t.clamp(0.0, 1.0);
+                    let cursor_x = rect.min.x + playback_t * rect.width();
+
+                    ui.painter().line_segment(
+                        [egui::pos2(cursor_x, rect.min.y), egui::pos2(cursor_x, rect.max.y)],
+                        egui::Stroke::new(2.0, egui::Color32::WHITE),
+                    );
+
+                    // Draw cursor triangle/head
+                    ui.painter().circle_filled(
+                        egui::pos2(cursor_x, rect.min.y),
+                        4.0,
+                        egui::Color32::WHITE,
+                    );
+                } else {
+                    ui.label("Session duration is zero, cannot display timeline.");
+                }
+
+                // Legend
+                ui.horizontal(|ui| {
+                    ui.label("Legend:");
+                    ui.colored_label(COLOR_COMMAND, "Command");
+                    ui.colored_label(COLOR_FILE_CHANGE, "File Change");
+                    ui.colored_label(COLOR_TERMINAL, "Terminal State");
+                });
             });
 
         } else {
