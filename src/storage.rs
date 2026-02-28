@@ -64,11 +64,19 @@ enum WriteCommand {
         content: Vec<u8>,
         resp: Option<Sender<Result<(), String>>>,
     },
+    Append {
+        path: PathBuf,
+        content: Vec<u8>,
+    },
+    Flush {
+        resp: Sender<()>,
+    },
 }
 
 static WRITE_QUEUE: Lazy<Mutex<SyncSender<WriteCommand>>> = Lazy::new(|| {
     let (tx, rx) = sync_channel(1000);
     thread::spawn(move || {
+        let mut handles: HashMap<PathBuf, std::fs::File> = HashMap::new();
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 WriteCommand::Overwrite {
@@ -76,6 +84,9 @@ static WRITE_QUEUE: Lazy<Mutex<SyncSender<WriteCommand>>> = Lazy::new(|| {
                     mut content,
                     resp,
                 } => {
+                    // Close cached handle for this path if it exists to avoid rename errors (Windows)
+                    handles.remove(&path);
+
                     let perform_write = || -> Result<(), String> {
                         let parent = path
                             .parent()
@@ -119,20 +130,39 @@ static WRITE_QUEUE: Lazy<Mutex<SyncSender<WriteCommand>>> = Lazy::new(|| {
                         tracing::error!("{}", msg);
                     }
 
-                    // Zeroize content after writing
-                    // Since Vec<u8> doesn't impl Zeroize directly without feature flags on some versions,
-                    // and we are inside the crate that uses it, we rely on the zeroize crate being available.
-                    // However, to be safe and compatible with how the rest of the code works (using Zeroize trait),
-                    // we can try to zeroize it. If Vec<u8> doesn't implement it, we might need a loop.
-                    // The project uses `zeroize` with `derive` feature. `u8` implements `Zeroize`.
-                    // But `Vec<u8>` implements `Zeroize` only if `alloc` feature of zeroize is enabled usually.
-                    // Let's assume standard zeroize behavior or do it manually if compilation fails.
-                    // Given previous code called zeroize() on data_bytes (Vec<u8>), it should work here.
                     content.zeroize();
 
                     if let Some(resp_tx) = resp {
                         let _ = resp_tx.send(result);
                     }
+                }
+                WriteCommand::Append { path, content } => {
+                    let entry = handles.entry(path.clone());
+                    let file = match entry {
+                        std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(v) => {
+                            match OpenOptions::new().create(true).append(true).open(&path) {
+                                Ok(f) => v.insert(f),
+                                Err(e) => {
+                                    tracing::error!("Failed to open log file {}: {}", path.display(), e);
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+                    if let Err(e) = file.write_all(&content) {
+                        tracing::error!("Failed to append to log file {}: {}", path.display(), e);
+                    }
+                    content.zeroize();
+                    let _ = file.flush();
+                }
+                WriteCommand::Flush { resp } => {
+                    for (path, mut file) in handles.drain() {
+                        if let Err(e) = file.flush() {
+                            tracing::error!("Failed to flush log file {}: {}", path.display(), e);
+                        }
+                    }
+                    let _ = resp.send(());
                 }
             }
         }
@@ -761,11 +791,27 @@ impl Storage {
     }
 
     pub fn flush(&self) -> crate::Result<()> {
+        self.flush_writer()?;
         if let Some(path) = &self.persistence_path {
             Self::save_to_path(path, self, true)?;
         } else {
             Self::save_to_disk(true)?;
         }
+        Ok(())
+    }
+
+    fn flush_writer(&self) -> crate::Result<()> {
+        let (tx, rx) = channel();
+        if let Ok(guard) = WRITE_QUEUE.lock() {
+            guard.send(WriteCommand::Flush { resp: tx }).map_err(|e| {
+                crate::error::TimeLoopError::Storage(format!("Background write queue failed: {}", e))
+            })?;
+        } else {
+            return Err(crate::error::TimeLoopError::Storage(
+                "Failed to lock write queue".to_string(),
+            ));
+        }
+        let _ = rx.recv();
         Ok(())
     }
 
@@ -822,6 +868,7 @@ impl Storage {
     /// Perform compaction: write a full snapshot atomically and rotate/truncate
     /// the append-only event log according to rotation/retention settings.
     pub fn compact(&self) -> crate::Result<()> {
+        self.flush_writer()?;
         // Persist current snapshot
         if let Some(path) = &self.persistence_path {
             Self::save_to_path(path, self, true)?;
@@ -1436,12 +1483,8 @@ impl Storage {
             None => return Ok(()),
         };
 
+        let mut content = Vec::new();
         if self.persistence_format == PersistenceFormat::Json {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             if let Some(key) = &self.encryption_key {
                 // encrypt event JSON bytes
                 let plain = serde_json::to_vec(event)?;
@@ -1451,46 +1494,55 @@ impl Storage {
                     ciphertext: general_purpose::STANDARD.encode(&ciphertext),
                 };
                 let line = serde_json::to_string(&wrapper)?;
-                file.write_all(line.as_bytes())
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                file.write_all(b"\n")
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                content.extend_from_slice(line.as_bytes());
+                content.push(b'\n');
             } else {
                 let line = serde_json::to_string(event)?;
-                file.write_all(line.as_bytes())
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                file.write_all(b"\n")
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                content.extend_from_slice(line.as_bytes());
+                content.push(b'\n');
             }
-            file.flush()
-                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         } else {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             if let Some(key) = &self.encryption_key {
                 let plain = serde_cbor::to_vec(event)?;
                 let (nonce, ciphertext) = Self::encrypt_bytes(key, &plain)?;
                 let wrapper = EncryptedEventCbor { nonce, ciphertext };
                 let buf = serde_cbor::to_vec(&wrapper)?;
                 let len = (buf.len() as u32).to_le_bytes();
-                file.write_all(&len)
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                file.write_all(&buf)
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                content.extend_from_slice(&len);
+                content.extend_from_slice(&buf);
             } else {
                 let buf = serde_cbor::to_vec(event)?;
                 let len = (buf.len() as u32).to_le_bytes();
-                file.write_all(&len)
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
-                file.write_all(&buf)
-                    .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+                content.extend_from_slice(&len);
+                content.extend_from_slice(&buf);
             }
+        }
+
+        // Try non-blocking send to background writer
+        let cmd = WriteCommand::Append {
+            path: path.clone(),
+            content: content.clone(),
+        };
+        let mut sent = false;
+        if let Ok(tx) = WRITE_QUEUE.lock() {
+            if tx.try_send(cmd).is_ok() {
+                sent = true;
+            }
+        }
+
+        if !sent {
+            // Fallback to synchronous write if background queue is full or lock fails
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
+            file.write_all(&content)
+                .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
             file.flush()
                 .map_err(|e| crate::error::TimeLoopError::FileSystem(e.to_string()))?;
         }
+        content.zeroize();
         Ok(())
     }
 }
