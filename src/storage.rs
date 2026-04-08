@@ -387,7 +387,7 @@ impl Storage {
             let events_path = Self::events_log_for(&pb, format);
             storage.events_log_path = Some(events_path);
             storage.append_only = true;
-            let _ = storage.load_events_from_log();
+            self.append_event_to_log(&event)?;
         }
         Ok(storage)
     }
@@ -526,20 +526,25 @@ impl Storage {
         result
     }
 
-    pub fn store_event(&self, event: &Event) -> crate::Result<()> {
-        // Always update in-memory storage
-        self.with_write(|guard| {
-            let session_events = guard.events.entry(event.session_id.clone()).or_default();
-            session_events.push(event.clone());
-        })?;
+    pub fn store_event(&self, event: Event) -> crate::Result<()> {
         // If append-only logging is enabled, append event to the log; otherwise
         // persist the full state as before.
         if self.append_only {
-            let _ = self.append_event_to_log(event);
-        } else if let Some(path) = &self.persistence_path {
-            let _ = Self::save_to_path(path, self, false);
-        } else if self.inner.is_none() {
-            let _ = Self::save_to_disk(false);
+            self.append_event_to_log(&event)?;
+        }
+
+        // Always update in-memory storage
+        self.with_write(|guard| {
+            let session_events = guard.events.entry(event.session_id.clone()).or_default();
+            session_events.push(event);
+        })?;
+
+        if !self.append_only {
+            if let Some(path) = &self.persistence_path {
+                Self::save_to_path(path, self)?;
+            } else if self.inner.is_none() {
+                Self::save_to_disk()?;
+            }
         }
         Ok(())
     }
@@ -776,7 +781,7 @@ impl Storage {
         let bundle: SessionExport = serde_json::from_str(&json_str)?;
         let id = bundle.session.id.clone();
         self.store_session(&bundle.session)?;
-        for event in &bundle.events {
+        for event in bundle.events {
             self.store_event(event)?;
         }
         Ok(id)
@@ -1642,7 +1647,7 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        storage.store_event(&event).unwrap();
+        storage.store_event(event).unwrap();
         let events = storage.get_events_for_session("test-session").unwrap();
         assert_eq!(events.len(), 1);
     }
@@ -1698,7 +1703,7 @@ mod tests {
             sequence_number: 1,
             timestamp: Utc::now(),
         };
-        storage.store_event(&event1).unwrap();
+        storage.store_event(event1).unwrap();
 
         let event2 = Event {
             id: Uuid::new_v4().to_string(),
@@ -1710,7 +1715,7 @@ mod tests {
             sequence_number: 2,
             timestamp: Utc::now(),
         };
-        storage.store_event(&event2).unwrap();
+        storage.store_event(event2).unwrap();
 
         // Flush to persist
         storage.flush().unwrap();
@@ -1842,7 +1847,7 @@ mod tests {
             sequence_number: 1,
             timestamp: Utc::now(),
         };
-        storage.store_event(&event1).unwrap();
+        storage.store_event(event1).unwrap();
 
         let event2 = Event {
             id: Uuid::new_v4().to_string(),
@@ -1854,7 +1859,7 @@ mod tests {
             sequence_number: 2,
             timestamp: Utc::now(),
         };
-        storage.store_event(&event2).unwrap();
+        storage.store_event(event2).unwrap();
 
         // Flush to persist
         storage.flush().unwrap();
@@ -1952,7 +1957,7 @@ mod tests {
             sequence_number: 1,
             timestamp: Utc::now(),
         };
-        storage.store_event(&ev).unwrap();
+        storage.store_event(ev).unwrap();
         storage.flush().unwrap();
 
         drop(storage);
@@ -1992,7 +1997,7 @@ mod tests {
             sequence_number: 1,
             timestamp: Utc::now(),
         };
-        storage.store_event(&ev).unwrap();
+        storage.store_event(ev).unwrap();
         storage.flush().unwrap();
 
         drop(storage);
@@ -2028,7 +2033,7 @@ mod tests {
                 sequence_number: i,
                 timestamp: Utc::now(),
             };
-            storage.store_event(&ev).unwrap();
+            storage.store_event(ev).unwrap();
         }
         // Force compaction/rotation
         storage.compact().unwrap();
